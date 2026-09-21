@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vocal Remover</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header>
+  <h1>Vocal Remover</h1>
+  <div id="health" class="pill pill--wait">checking…</div>
+</header>
+
+<!-- Shown only when the Tidal session is missing or expired. The login flow
+     is a one-time CLI step, so this points at it rather than duplicating a
+     device-code UI in the browser. -->
+<div id="auth-warning" class="banner banner--warn" hidden>
+  <strong>Not signed in to Tidal.</strong>
+  <span>Run this once, then reload:</span>
+  <code id="login-command"></code>
+</div>
+
+<div id="worker-warning" class="banner banner--error" hidden></div>
+
+<main>
+  <form id="submit-form" autocomplete="off">
+    <label class="field field--grow">
+      <span>Tidal track URL</span>
+      <input id="url" type="text" required
+             placeholder="https://tidal.com/track/242542596"
+             aria-describedby="url-hint">
+    </label>
+
+    <label class="field">
+      <span>Model</span>
+      <select id="model"></select>
+    </label>
+
+    <label class="field">
+      <span>Format</span>
+      <select id="format">
+        <option value="FLAC" selected>FLAC</option>
+        <option value="WAV">WAV</option>
+        <option value="MP3">MP3</option>
+      </select>
+    </label>
+
+    <button id="submit" type="submit">Separate</button>
+  </form>
+
+  <p id="url-hint" class="hint">
+    Single tracks only — album, playlist and mix URLs are rejected.
+  </p>
+
+  <div id="form-error" class="banner banner--error" hidden></div>
+
+  <section id="jobs"></section>
+  <p id="empty" class="hint hint--center">No jobs yet.</p>
+</main>
+
+<script src="/app.js"></script>
+</body>
+</html>

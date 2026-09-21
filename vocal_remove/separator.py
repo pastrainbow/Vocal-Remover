@@ -161,6 +161,23 @@ def separate(
 
     Returns the two output paths. Raises ModelLoadError if the model is not
     in a usable state, plus OutOfMemory, SeparationError or AudioNotFound.
+
+    TODO: emit chunk-count progress.
+      This call is opaque: it blocks for 20-126s (model dependent) and returns
+      nothing until finished, so callers cannot show real progress and the web
+      worker has to guard it with a wall-clock timeout instead.
+
+      Both architectures already iterate chunks internally - MDXC and MDX wrap
+      their chunk loops in tqdm inside demix() - so the information exists; it
+      just is not exposed. Add an optional `progress` callback here, invoked
+      as (done_chunks, total_chunks), by intercepting that tqdm (audio-separator
+      takes no callback of its own, so this means wrapping or monkeypatching
+      its progress bar - a private-API dependency, which is why it was not done
+      up front).
+
+      When this lands, the app worker's separation timeout should be deleted:
+      real progress makes a stalled job detectable without guessing how long
+      the work should have taken.
     """
     if model is None or not model.ok:
         status = model.status.value if model is not None else "missing"

@@ -206,10 +206,31 @@ class TidalClient:
 
     # ------------------------------------------------------------ internal
 
-    @staticmethod
-    def _track_id(url: str) -> int:
-        """Accept a track URL in any Tidal shape, or a bare id."""
-        for part in reversed(str(url).split("?")[0].strip("/").split("/")):
+    #: Resource words that appear in Tidal URL paths. Anything other than
+    #: "track" is a different kind of thing and must not be downloaded as one.
+    _NON_TRACK_RESOURCES = ("album", "playlist", "mix", "artist", "video")
+
+    @classmethod
+    def _track_id(cls, url: str) -> int:
+        """Accept a track URL in any Tidal shape, or a bare id.
+
+        The resource word is checked, not just the trailing number. Album and
+        playlist URLs also end in a numeric id, so matching on digits alone
+        silently downloads whatever TRACK happens to share that id - a real
+        bug this guard exists to prevent.
+        """
+        parts = [p for p in str(url).split("?")[0].strip("/").split("/") if p]
+        lowered = [p.lower() for p in parts]
+
+        for resource in cls._NON_TRACK_RESOURCES:
+            if resource in lowered:
+                article = "an" if resource[0] in "aeiou" else "a"
+                raise errors.UnsupportedUrl(
+                    f"{url!r} is {article} {resource} URL; only single tracks "
+                    f"are supported"
+                )
+
+        for part in reversed(parts):
             if part.isdigit():
                 return int(part)
         raise errors.UnsupportedUrl(

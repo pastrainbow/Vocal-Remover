@@ -301,3 +301,33 @@ class DemucsSeparationConfig(SeparationConfig):
 
     def _apply_arch(self, instance) -> None:
         return None
+
+
+# ----------------------------------------------------------------- dispatch
+
+
+def config_classes_for(model_name: str):
+    """(ModelConfig subclass, SeparationConfig subclass) for a model filename.
+
+    audio-separator works the architecture out from the model data itself, but
+    callers still have to pick the matching config subclass so parameters land
+    in the dict that architecture actually reads. Dispatching on the extension
+    is what UVR's own naming supports.
+
+    Note `.yaml` is ambiguous - MDX23C and Demucs both use it - so Demucs is
+    identified by name prefix. An unrecognised extension falls back to MDXC,
+    the default architecture.
+    """
+    name = str(model_name)
+    suffix = Path(name).suffix.lower()
+    stem = Path(name).name.lower()
+
+    if suffix == ".onnx":
+        return MDXModelConfig, MDXSeparationConfig
+    if suffix == ".pth":
+        return VRModelConfig, VRSeparationConfig
+    if suffix == ".yaml" and (stem.startswith("htdemucs")
+                              or stem.startswith("hdemucs")
+                              or stem.startswith("demucs")):
+        return DemucsModelConfig, DemucsSeparationConfig
+    return MDXCModelConfig, MDXCSeparationConfig

@@ -35,6 +35,7 @@ from .config import (
     SeparationConfig,
     VRModelConfig,
     VRSeparationConfig,
+    config_classes_for,
 )
 from .errors import (
     AudioNotFound,
@@ -59,6 +60,7 @@ __all__ = [
     # config - abstract
     "ModelConfig",
     "SeparationConfig",
+    "config_classes_for",
     # config - per architecture
     "MDXCModelConfig",
     "MDXCSeparationConfig",
