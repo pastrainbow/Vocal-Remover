@@ -33,13 +33,149 @@ async function loadHealth() {
     w.hidden = false;
   }
 
-  const authed = health.tidal.authenticated;
-  el("auth-warning").hidden = authed;
-  el("login-command").textContent = health.tidal.login_command;
+  await renderAuth(health);
   // Nothing can be submitted without a Tidal session or a worker.
-  el("submit").disabled = !authed || !worker.running;
+  el("submit").disabled = !health.tidal.authenticated || !worker.running;
 
   return health;
+}
+
+// ------------------------------------------------------------------- login
+
+// How often the page asks where the login has got to. The server does the
+// real polling on its own thread, at Tidal's interval, so this only paces
+// the countdown on screen.
+const LOGIN_POLL_MS = 2000;
+let loginTimer = null;
+let loginCommand = "";
+
+async function renderAuth(health) {
+  loginCommand = health.tidal.login_command;
+  const box = el("auth-warning");
+  el("logout").hidden = !health.tidal.authenticated;
+
+  if (health.tidal.authenticated) {
+    stopLoginPoll();
+    box.replaceChildren();
+    box.hidden = true;
+    return;
+  }
+
+  box.hidden = false;
+  // A login may already be running - started in another tab, or before this
+  // page was reloaded - so ask before offering to start a new one.
+  showLogin(await fetchLogin());
+}
+
+async function fetchLogin() {
+  try {
+    return await (await fetch("/api/login")).json();
+  } catch {
+    return { state: "idle", detail: "" };
+  }
+}
+
+function showLogin(login) {
+  const box = el("auth-warning");
+
+  if (login.state === "pending") {
+    box.replaceChildren(
+      node("strong", "", "Finish signing in to Tidal:"),
+      loginLink(login.verification_url),
+      node("span", "", "then enter"),
+      node("code", "", login.user_code),
+      node("span", "banner__note",
+           `expires in ${formatDuration(login.seconds_left)}`),
+    );
+    startLoginPoll();
+    return;
+  }
+
+  stopLoginPoll();
+  const failed = login.state === "expired" || login.state === "error";
+  box.replaceChildren(
+    node("strong", "", failed
+      ? `Sign-in did not finish — ${login.detail}`
+      : "Not signed in to Tidal."),
+    loginButton(failed ? "Try again" : "Sign in to Tidal"),
+    node("span", "banner__note", "or run:"),
+    node("code", "", loginCommand),
+  );
+}
+
+async function startLogin(event) {
+  const button = event.currentTarget;
+  button.disabled = true;
+  button.textContent = "asking Tidal…";
+  try {
+    const response = await fetch("/api/login", { method: "POST" });
+    const body = await response.json();
+    showLogin(response.ok
+      ? body
+      : { state: "error", detail: body.detail || `failed (${response.status})` });
+  } catch (err) {
+    showLogin({ state: "error", detail: String(err) });
+  }
+}
+
+function startLoginPoll() {
+  if (loginTimer) return;
+  loginTimer = setInterval(async () => {
+    const login = await fetchLogin();
+    if (login.state === "ok") {
+      stopLoginPoll();
+      await loadHealth();  // clears the banner and enables Separate
+      return;
+    }
+    showLogin(login);
+  }, LOGIN_POLL_MS);
+}
+
+function stopLoginPoll() {
+  if (loginTimer) clearInterval(loginTimer);
+  loginTimer = null;
+}
+
+el("logout").addEventListener("click", async (event) => {
+  const button = event.currentTarget;
+  const errorBox = el("form-error");
+  button.disabled = true;
+  errorBox.hidden = true;
+  try {
+    const response = await fetch("/api/logout", { method: "POST" });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      errorBox.textContent =
+        `Sign-out failed: ${body.detail || response.status}`;
+      errorBox.hidden = false;
+    }
+  } catch (err) {
+    errorBox.textContent = `Sign-out failed: ${err}`;
+    errorBox.hidden = false;
+  } finally {
+    button.disabled = false;
+    // Whatever happened, let the server say where things stand: this shows
+    // the sign-in banner and disables Separate.
+    await loadHealth();
+  }
+});
+
+function loginLink(url) {
+  const a = document.createElement("a");
+  a.href = url;
+  a.target = "_blank";
+  a.rel = "noopener noreferrer";
+  // The URL carries the code, so opening it is usually the whole step.
+  a.textContent = "open the Tidal page";
+  return a;
+}
+
+function loginButton(label) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.textContent = label;
+  button.addEventListener("click", startLogin);
+  return button;
 }
 
 function setPill(text, kind) {
@@ -255,6 +391,7 @@ function close(jobId) {
   const health = await loadHealth();
   await loadModels(health);
   await loadRecent();
-  // Cheap poll so the banner clears once you log in via the CLI.
+  // Cheap poll: catches a session that expires while the page is open, or a
+  // login done elsewhere (another tab, or the CLI).
   setInterval(loadHealth, 15000);
 })();

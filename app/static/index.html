@@ -11,16 +11,15 @@
 <header>
   <h1>Vocal Remover</h1>
   <div id="health" class="pill pill--wait">checking…</div>
+  <!-- Shown only while a Tidal session exists; the sign-in half of this
+       lives in the banner below. -->
+  <button id="logout" class="button--quiet" type="button" hidden>Sign out</button>
 </header>
 
-<!-- Shown only when the Tidal session is missing or expired. The login flow
-     is a one-time CLI step, so this points at it rather than duplicating a
-     device-code UI in the browser. -->
-<div id="auth-warning" class="banner banner--warn" hidden>
-  <strong>Not signed in to Tidal.</strong>
-  <span>Run this once, then reload:</span>
-  <code id="login-command"></code>
-</div>
+<!-- Shown only when the Tidal session is missing or expired. Filled by
+     renderAuth(), which walks the device-code flow: sign in, show the code,
+     then clear itself once Tidal reports the session live. -->
+<div id="auth-warning" class="banner banner--warn" hidden></div>
 
 <div id="worker-warning" class="banner banner--error" hidden></div>
 
