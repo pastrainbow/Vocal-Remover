@@ -1,6 +1,8 @@
 "use strict";
 
 const STAGES = ["queued", "downloading", "separating", "done"];
+// The stages that report a fraction to fill a bar with.
+const MEASURED = ["downloading", "separating"];
 
 const el = (id) => document.getElementById(id);
 const jobsEl = el("jobs");
@@ -20,15 +22,14 @@ async function loadHealth() {
   }
 
   const worker = health.worker;
-  if (worker.healthy) {
+  if (worker.running) {
     const loaded = worker.models.filter((m) => m.status === "loaded");
     const device = loaded.length ? loaded[0].device : "?";
     setPill(`${loaded.length} model${loaded.length === 1 ? "" : "s"} on ${device}`, "ok");
   } else {
     setPill("worker down", "error");
     const w = el("worker-warning");
-    w.textContent = worker.compromised
-      || "The worker is not running. Restart the server.";
+    w.textContent = "The worker is not running. Restart the server.";
     w.hidden = false;
   }
 
@@ -36,7 +37,7 @@ async function loadHealth() {
   el("auth-warning").hidden = authed;
   el("login-command").textContent = health.tidal.login_command;
   // Nothing can be submitted without a Tidal session or a worker.
-  el("submit").disabled = !authed || !worker.healthy;
+  el("submit").disabled = !authed || !worker.running;
 
   return health;
 }
@@ -146,17 +147,15 @@ function renderJob(job) {
       seg.classList.add("stage--failed");
     } else if (index < reached) {
       seg.classList.add("stage--done");
-    } else if (stage === job.stage && stage === "downloading" && job.progress > 0) {
+    } else if (stage === job.stage && MEASURED.includes(stage) && job.progress > 0) {
       seg.classList.add("stage--active");
       const fill = document.createElement("i");
       fill.style.setProperty("--pct", `${Math.round(job.progress * 100)}%`);
       seg.append(fill);
-    } else if (stage === job.stage && stage === "downloading") {
-      // Hi-res streams arrive as segmented MPD with no Content-Length, so
-      // there is no fraction to report. Sweep rather than sit at a frozen
-      // 0%, which reads as hung.
-      seg.classList.add("stage--busy");
-    } else if (stage === job.stage && stage === "separating") {
+    } else if (stage === job.stage && MEASURED.includes(stage)) {
+      // No fraction yet: a hi-res download arrives as segmented MPD with no
+      // Content-Length, and a separation reports nothing until its first
+      // chunk. Sweep rather than sit at a frozen 0%, which reads as hung.
       seg.classList.add("stage--busy");
     } else if (job.stage === "done") {
       seg.classList.add("stage--done");
@@ -176,8 +175,8 @@ function renderJob(job) {
 
 function metaLine(job) {
   const bits = [];
-  if (job.stage === "downloading" && job.progress > 0) {
-    bits.push(`downloading ${Math.round(job.progress * 100)}%`);
+  if (MEASURED.includes(job.stage) && job.progress > 0) {
+    bits.push(`${job.stage} ${Math.round(job.progress * 100)}%`);
   } else {
     bits.push(job.stage);
   }

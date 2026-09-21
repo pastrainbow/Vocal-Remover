@@ -117,11 +117,10 @@ def submit_job(body: SubmitRequest, response: Response,
     model = body.model or settings.default_model
     output_format = (body.output_format or settings.output_format).upper()
 
-    if not worker.healthy:
+    if not worker.running:
         raise HTTPException(
             status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=(worker.compromised
-                    or "worker is not running; restart the server"),
+            detail="worker is not running; restart the server",
         )
     if model not in worker.models:
         raise HTTPException(

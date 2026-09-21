@@ -3,9 +3,14 @@
 Two public functions:
 
     models = init_models([MDXCModelConfig(), MDXModelConfig()])  # once
-    result = separate("song.flac", models[0],
-                      MDXCSeparationConfig(output_dir="out/job1"))
-    result.vocals, result.instrumental                           # both Paths
+    job = separate("song.flac", models[0],
+                   MDXCSeparationConfig(output_dir="out/job1"))   # returns now
+    job.get_progress()                                            # 0.0 - 1.0
+    result = job.result()                                         # blocks
+    result.vocals, result.instrumental                            # both Paths
+
+separate() is asynchronous because separation takes 20-126s and callers need
+to show progress while it runs; see the Separation class below.
 
 init_models() is deliberately separate from separate() because loading costs
 1.6-3.3s warm (and 20-30s cold, including the download) while separation takes
@@ -23,15 +28,16 @@ so one unusable model does not stop the others loading.
 import torch  # noqa: F401  # isort: skip
 
 import logging
+import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Iterable, List, Optional
 
 from audio_separator.separator import Separator
 
-from . import errors
+from . import errors, progress
 from .config import ModelConfig, SeparationConfig
 
 logger = logging.getLogger("vocal_remove")
@@ -39,6 +45,15 @@ logger = logging.getLogger("vocal_remove")
 #: Stem keys audio-separator uses for two-stem models.
 _VOCALS = "Vocals"
 _INSTRUMENTAL = "Instrumental"
+
+#: How much of the 0-1 range the chunk loop owns. The rest is the tail after
+#: the last chunk - inverting the second stem and writing both - which is not
+#: instrumented. Measured on the 229.5s test track: 0.4s of 122.6s on
+#: BS-Roformer, and 1-2s of ~19s on MDX-Net where it is disk-bound on two
+#: FLACs. So 3% covers the slow model and leaves the fast one sitting at 97%
+#: for a second or two. (Decoding the input, before the first chunk, sits at 0
+#: instead: 3s of 19s on MDX-Net. There is nothing to count there.)
+_CHUNK_SHARE = 0.97
 
 
 class LoadStatus(Enum):
@@ -65,6 +80,12 @@ class LoadedModel:
     device: str = "cpu"
     load_seconds: float = 0.0
     error: Optional[str] = None
+
+    #: Serialises separations on this model. audio-separator keeps per-job
+    #: settings (output dir, format, overlap) on the one shared model
+    #: instance, so two concurrent separations would read each other's.
+    lock: threading.Lock = field(default_factory=threading.Lock,
+                                 repr=False, compare=False)
 
     @property
     def ok(self) -> bool:
@@ -156,37 +177,166 @@ def separate(
     audio_path,
     model: LoadedModel,
     config: SeparationConfig,
-) -> SeparateResult:
-    """Split one audio file into vocal-only and instrumental-only stems.
+) -> "Separation":
+    """Start splitting one audio file into vocal and instrumental stems.
 
-    Returns the two output paths. Raises ModelLoadError if the model is not
-    in a usable state, plus OutOfMemory, SeparationError or AudioNotFound.
+    Returns immediately with a handle on the work, which runs on a background
+    thread:
 
-    TODO: emit chunk-count progress.
-      This call is opaque: it blocks for 20-126s (model dependent) and returns
-      nothing until finished, so callers cannot show real progress and the web
-      worker has to guard it with a wall-clock timeout instead.
+        job = separate("song.flac", model, MDXCSeparationConfig(...))
+        while not job.wait(0.5):
+            print("%.0f%%" % (job.get_progress() * 100))
+        stems = job.result()          # the failure, if any, surfaces here
 
-      Both architectures already iterate chunks internally - MDXC and MDX wrap
-      their chunk loops in tqdm inside demix() - so the information exists; it
-      just is not exposed. Add an optional `progress` callback here, invoked
-      as (done_chunks, total_chunks), by intercepting that tqdm (audio-separator
-      takes no callback of its own, so this means wrapping or monkeypatching
-      its progress bar - a private-API dependency, which is why it was not done
-      up front).
-
-      When this lands, the app worker's separation timeout should be deleted:
-      real progress makes a stalled job detectable without guessing how long
-      the work should have taken.
+    This call raises nothing. Every failure - an unusable model, a missing
+    file, CUDA OOM - comes out of result() instead, so callers handle errors
+    in one place rather than two.
     """
-    if model is None or not model.ok:
-        status = model.status.value if model is not None else "missing"
-        raise errors.ModelLoadError(
-            f"model is not usable (status={status}): "
-            f"{(model.error if model is not None else 'no model given')}"
+    return Separation(audio_path, model, config)
+
+
+class Separation:
+    """A separation running on a background thread.
+
+    Progress is real, counted off the chunk loop inside audio-separator (see
+    progress.py), except on architectures whose loops are not modelled, where
+    `indeterminate` is True and get_progress() only reports 0.0 or 1.0.
+
+    Separations on the same LoadedModel are serialised - audio-separator keeps
+    per-job settings on the one shared model instance - so a second one queues
+    behind the first and reports no progress until it starts.
+    """
+
+    def __init__(self, audio_path, model: LoadedModel,
+                 config: SeparationConfig):
+        self.audio_path = Path(audio_path)
+        self.model = model
+        self.config = config
+
+        self._started = time.time()
+        self._finished: Optional[float] = None
+        self._result: Optional[SeparateResult] = None
+        self._error: Optional[BaseException] = None
+        self._done = threading.Event()
+        # Built up front, not in the thread, so cancel() works from the moment
+        # this returns - including before the first chunk is reached.
+        self._tracker = progress.tracker_for(
+            getattr(model.separator, "model_instance", None)
+            if model is not None else None
         )
 
-    audio_path = Path(audio_path)
+        # A bare daemon thread, NOT ThreadPoolExecutor: the executor's atexit
+        # hook joins its workers on shutdown, which would block until a
+        # runaway separation finishes. A daemon thread dies with the process.
+        self._thread = threading.Thread(
+            target=self._run, name=f"separate-{self.audio_path.stem[:16]}",
+            daemon=True,
+        )
+        self._thread.start()
+
+    # --------------------------------------------------------------- status
+
+    def get_progress(self) -> float:
+        """How far along this separation is, from 0.0 to 1.0.
+
+        1.0 means finished and successful. A separation that failed or was
+        cancelled stops where it got to, so the number still says where it
+        died. Never goes backwards.
+        """
+        if self._done.is_set() and self._error is None:
+            return 1.0
+        return self._chunk_progress()
+
+    def _chunk_progress(self) -> float:
+        if self._tracker.indeterminate:
+            return 0.0
+        return min(self._tracker.fraction * _CHUNK_SHARE, _CHUNK_SHARE)
+
+    @property
+    def indeterminate(self) -> bool:
+        """True when this architecture reports no usable chunk counts."""
+        return self._tracker.indeterminate
+
+    @property
+    def done(self) -> bool:
+        """True once the work has finished, failed or been cancelled."""
+        return self._done.is_set()
+
+    @property
+    def error(self) -> Optional[BaseException]:
+        """How it failed, without raising. None while running or on success."""
+        return self._error
+
+    @property
+    def seconds(self) -> float:
+        """Wall clock since the start, frozen once finished."""
+        return (self._finished or time.time()) - self._started
+
+    # ---------------------------------------------------------------- await
+
+    def wait(self, timeout: Optional[float] = None) -> bool:
+        """Block for up to `timeout`. True if the separation has finished."""
+        return self._done.wait(timeout)
+
+    def result(self, timeout: Optional[float] = None) -> SeparateResult:
+        """The stems, waiting for them if necessary.
+
+        Raises whatever the separation raised - ModelLoadError, AudioNotFound,
+        OutOfMemory, SeparationError, or Cancelled after a cancel() - and
+        TimeoutError if `timeout` passes with the work still running, which
+        leaves it running.
+        """
+        if not self._done.wait(timeout):
+            raise TimeoutError(
+                f"separation of {self.audio_path.name} is still running after "
+                f"{timeout}s"
+            )
+        if self._error is not None:
+            raise self._error
+        return self._result
+
+    def cancel(self) -> None:
+        """Ask the separation to stop, and return without waiting.
+
+        It stops at the next chunk boundary, so within a chunk's worth of work
+        (under a second on the measured models) once inference has started.
+        Cancelling before then - while the input is decoding - takes effect at
+        the first chunk instead. result() then raises Cancelled.
+
+        Best effort: Demucs is not instrumented and ignores this, and neither
+        is writing the stems, so a cancel after the last chunk may still
+        produce a result.
+        """
+        self._tracker.cancel()
+
+    # ----------------------------------------------------------------- work
+
+    def _run(self) -> None:
+        try:
+            if self.model is None or not self.model.ok:
+                status = (self.model.status.value
+                          if self.model is not None else "missing")
+                raise errors.ModelLoadError(
+                    f"model is not usable (status={status}): "
+                    f"{(self.model.error if self.model is not None else 'no model given')}"
+                )
+            with self.model.lock:
+                self._result = _separate_blocking(
+                    self.audio_path, self.model, self.config, self._tracker)
+        except BaseException as exc:  # noqa: BLE001 - re-raised from result()
+            self._error = exc
+        finally:
+            self._finished = time.time()
+            self._done.set()
+
+
+def _separate_blocking(audio_path: Path, model: LoadedModel,
+                       config: SeparationConfig,
+                       tracker: progress.Tracker) -> SeparateResult:
+    """The separation itself. Runs on Separation's thread, never the caller's.
+
+    The model is already known usable and the model lock already held.
+    """
     if not audio_path.is_file():
         raise errors.AudioNotFound(f"no such audio file: {audio_path}")
 
@@ -203,13 +353,24 @@ def separate(
 
     started = time.time()
     try:
-        produced = model.separator.separate(str(audio_path), custom_output_names=names)
+        # tracking() redirects the chunk loop's progress bar into `tracker`
+        # for this thread only, and is what makes cancel() bite.
+        with progress.tracking(tracker):
+            produced = model.separator.separate(str(audio_path),
+                                                custom_output_names=names)
     except torch.cuda.OutOfMemoryError as exc:
         torch.cuda.empty_cache()
         raise errors.OutOfMemory(
             "CUDA ran out of memory. Lower segment_size on the ModelConfig "
             "(try 128) or batch_size on the SeparationConfig, then reload."
         ) from exc
+    except errors.Cancelled:
+        # Raised by us from inside the chunk loop, so it is not a failure to
+        # translate. audio-separator clears the GPU cache and its per-file
+        # state on the way out, leaving the model usable for the next job.
+        logger.info("separation of %s cancelled after %.1fs",
+                    audio_path.name, time.time() - started)
+        raise
     except Exception as exc:
         raise errors.SeparationError(
             f"separation failed: {type(exc).__name__}: {exc}"

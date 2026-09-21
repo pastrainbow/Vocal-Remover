@@ -192,7 +192,7 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
 .stage--done   { background: var(--ok); }
 .stage--failed { background: var(--error); }
 
-/* Download has a real fraction. */
+/* Download and separation both report a real fraction. */
 .stage--active > i {
   display: block;
   height: 100%;
@@ -201,9 +201,9 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
   transition: width 0.25s ease;
 }
 
-/* Separation reports nothing until it returns (see the TODO on
-   vocal_remove.separate), so this is an indeterminate sweep, not a lie
-   about progress. */
+/* Shown only while a stage has no fraction yet - a download with no
+   Content-Length, or a separation before its first chunk. An indeterminate
+   sweep, not a lie about progress. */
 .stage--busy::after {
   content: "";
   position: absolute;

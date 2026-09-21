@@ -6,8 +6,11 @@
     models = init_models([MDXCModelConfig()])       # a list in, a list out
     model = models[0]
     if model.ok:
-        stems = separate("song.flac", model,
-                         MDXCSeparationConfig(output_dir="out/job123"))
+        job = separate("song.flac", model,
+                       MDXCSeparationConfig(output_dir="out/job123"))
+        while not job.wait(0.5):                    # separate() returns at once
+            print(job.get_progress())               # 0.0 -> 1.0
+        stems = job.result()  # blocks if still running; raises if it failed
         stems.vocals          # Path to the vocal-only track
         stems.instrumental    # Path to the instrumental-only track
 
@@ -39,13 +42,21 @@ from .config import (
 )
 from .errors import (
     AudioNotFound,
+    Cancelled,
     InvalidConfig,
     ModelLoadError,
     OutOfMemory,
     SeparationError,
     VocalRemoveError,
 )
-from .separator import LoadedModel, LoadStatus, SeparateResult, init_models, separate
+from .separator import (
+    LoadedModel,
+    LoadStatus,
+    Separation,
+    SeparateResult,
+    init_models,
+    separate,
+)
 
 from . import errors  # noqa: F401  so `from vocal_remove import *` binds it
 
@@ -56,6 +67,7 @@ __all__ = [
     "separate",
     "LoadedModel",
     "LoadStatus",
+    "Separation",
     "SeparateResult",
     # config - abstract
     "ModelConfig",
@@ -83,4 +95,5 @@ __all__ = [
     "AudioNotFound",
     "SeparationError",
     "OutOfMemory",
+    "Cancelled",
 ]

@@ -49,14 +49,6 @@ class Settings(BaseSettings):
     #: Only set if you hit CUDA OOM; trades separation quality for memory.
     segment_size: Optional[int] = None
 
-    # -------------------------------------------------------------- timeout
-    #: Separation is opaque - separate() blocks with no progress (see the TODO
-    #: on vocal_remove.separate). Until chunk-count progress exists, a job is
-    #: failed if it exceeds duration/multiplier * this factor.
-    separation_timeout_factor: float = 2.5
-    #: Floor for very short tracks, where the multiplier estimate is noisy.
-    separation_timeout_floor_seconds: int = 120
-
     # ----------------------------------------------------------------- http
     host: str = "127.0.0.1"
     port: int = 8000

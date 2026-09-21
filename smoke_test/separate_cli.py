@@ -76,18 +76,31 @@ def main(argv=None):
     if not model.on_gpu:
         print("  WARNING       : not on GPU - this will be very slow")
 
+    job = separate(args.audio, model,
+                   sep_cls(output_dir=args.out,
+                           output_format=args.format,
+                           overlap=args.overlap,
+                           batch_size=args.batch))
     try:
-        stems = separate(args.audio, model,
-                         sep_cls(output_dir=args.out,
-                                 output_format=args.format,
-                                 overlap=args.overlap,
-                                 batch_size=args.batch))
+        while not job.wait(0.25):
+            # \r rather than a line each: this shares stderr with
+            # audio-separator's own tqdm bar.
+            print("  progress      : %5.1f%%  (%.0fs)"
+                  % (job.get_progress() * 100, job.seconds), end="\r")
+        print("  progress      : %5.1f%%  (%.0fs)"
+              % (job.get_progress() * 100, job.seconds))
+        stems = job.result()
     except errors.OutOfMemory as exc:
         print("  CUDA OOM: %s" % exc)
         return 1
     except (errors.AudioNotFound, errors.SeparationError) as exc:
         print("  %s: %s" % (type(exc).__name__, exc))
         return 1
+    except KeyboardInterrupt:
+        print("\n  cancelling at the next chunk...")
+        job.cancel()
+        print("  stopped" if job.wait(30) else "  still running; abandoning it")
+        return 130
 
     def mib(p):
         return Path(p).stat().st_size / 2 ** 20

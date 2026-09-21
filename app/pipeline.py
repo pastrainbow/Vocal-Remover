@@ -9,9 +9,8 @@ worker loop must survive one bad job.
 import logging
 import shutil
 import sqlite3
-import threading
 from pathlib import Path
-from typing import Mapping, Optional
+from typing import Mapping
 
 import tidal_download as td
 import vocal_remove as vr
@@ -21,48 +20,16 @@ from . import jobs as jobs_repo
 
 logger = logging.getLogger("app.pipeline")
 
-#: Measured on an RTX 4060 with a 229.5s track: how many seconds of audio each
-#: model separates per second of wall clock. Used only to size the timeout.
-_REALTIME_MULTIPLIER = {
-    "model_bs_roformer_ep_317_sdr_12.9755.ckpt": 1.8,   # 126.5s
-    "UVR-MDX-NET-Voc_FT.onnx": 11.7,                    # 19.6s
-}
-#: Unknown models are assumed slower than anything measured, so an unfamiliar
-#: model gets a generous timeout rather than a spurious failure.
-_UNKNOWN_MULTIPLIER = 1.0
-#: When track duration is unknown there is nothing to scale, so allow a lot.
-_NO_DURATION_TIMEOUT = 30 * 60
-
-
-class WorkerCompromised(RuntimeError):
-    """Separation exceeded its timeout and could not be cancelled.
-
-    separate() blocks inside CUDA/C, so a Python thread cannot interrupt it.
-    The job is failed, but the runaway thread still holds the GPU, so the
-    worker process must restart to get back to a known state.
-    """
-
-
-def separation_timeout(duration_seconds: Optional[int], model: str,
-                       factor: float, floor_seconds: int) -> float:
-    """How long separation is allowed before the job is abandoned.
-
-    A stand-in for real progress: separate() reports nothing until it returns
-    (see the TODO on vocal_remove.separate), so a stalled job is otherwise
-    indistinguishable from a slow one. Delete this once chunk counts exist.
-    """
-    if not duration_seconds:
-        return float(_NO_DURATION_TIMEOUT)
-    multiplier = _REALTIME_MULTIPLIER.get(model, _UNKNOWN_MULTIPLIER)
-    return max(float(floor_seconds), (duration_seconds / multiplier) * factor)
+#: How often the separating job's progress is read and written back.
+_PROGRESS_POLL_SECONDS = 0.5
 
 
 def run_job(conn, job_id: str, client: td.TidalClient,
             models: Mapping[str, vr.LoadedModel], settings) -> Job:
     """Take one queued job through to done or failed.
 
-    Returns the finished Job. Raises only WorkerCompromised, which the caller
-    must treat as fatal to the process.
+    Returns the finished Job, and raises only if recording the failure itself
+    failed - every error from the work is written to the job instead.
     """
     job = jobs_repo.get(conn, job_id)
     if job is None:
@@ -73,7 +40,7 @@ def run_job(conn, job_id: str, client: td.TidalClient,
 
     try:
         download = _download(conn, job, client, staging)
-        stems = _separate(conn, job, download, models, out_dir, settings)
+        stems = _separate(conn, job, download, models, out_dir)
         # Inside the try on purpose: completing is where the unique cache
         # index can fire, and that must be explained rather than escaping as
         # an unhandled error.
@@ -82,8 +49,6 @@ def run_job(conn, job_id: str, client: td.TidalClient,
             vocals_path=str(stems.vocals),
             instrumental_path=str(stems.instrumental),
         )
-    except WorkerCompromised:
-        raise
     except sqlite3.IntegrityError:
         # Another job for this (track, model, format) completed while this one
         # was running, so the unique cache index rejects this one. The work is
@@ -139,8 +104,8 @@ def _download(conn, job: Job, client: td.TidalClient,
 
 
 def _separate(conn, job: Job, download: td.DownloadResult,
-              models: Mapping[str, vr.LoadedModel], out_dir: Path,
-              settings) -> vr.SeparateResult:
+              models: Mapping[str, vr.LoadedModel],
+              out_dir: Path) -> vr.SeparateResult:
     model = models.get(job.model)
     if model is None:
         raise vr.ModelLoadError(
@@ -150,47 +115,23 @@ def _separate(conn, job: Job, download: td.DownloadResult,
 
     _, sep_cls = vr.config_classes_for(job.model)
     sep_config = sep_cls(output_dir=out_dir, output_format=job.output_format)
+    logger.info("job %s separating with %s", job.id, job.model)
 
-    timeout = separation_timeout(
-        download.track.duration, job.model,
-        settings.separation_timeout_factor,
-        settings.separation_timeout_floor_seconds,
-    )
-    logger.info("job %s separating with %s (timeout %.0fs)",
-                job.id, job.model, timeout)
+    # separate() returns a handle immediately; the work runs on its own daemon
+    # thread inside vocal_remove.
+    handle = vr.separate(download.path, model, sep_config)
+    last_pct = -1
 
-    # A bare daemon thread, NOT ThreadPoolExecutor: the executor's context
-    # manager (and its atexit hook) join their workers on shutdown, which
-    # blocks until a runaway separation finishes - defeating the timeout in
-    # precisely the hung case it exists to catch. A daemon thread can be
-    # abandoned, and dies with the process.
-    box: dict = {}
+    while not handle.wait(_PROGRESS_POLL_SECONDS):
+        fraction = handle.get_progress()
+        # Throttle writes to whole percent, as the download does: the poll is
+        # far finer-grained than anything the page can show.
+        pct = int(fraction * 100)
+        if pct != last_pct:
+            last_pct = pct
+            jobs_repo.set_progress(conn, job.id, fraction)
 
-    def _work():
-        try:
-            box["result"] = vr.separate(download.path, model, sep_config)
-        except BaseException as exc:  # noqa: BLE001 - re-raised on the caller
-            box["error"] = exc
-
-    thread = threading.Thread(target=_work, name=f"sep-{job.id[:8]}",
-                              daemon=True)
-    thread.start()
-    thread.join(timeout=timeout)
-
-    if thread.is_alive():
-        jobs_repo.advance(
-            conn, job.id, Stage.FAILED,
-            error=f"separation exceeded {timeout:.0f}s and was abandoned",
-        )
-        raise WorkerCompromised(
-            f"job {job.id}: separation timed out after {timeout:.0f}s; the "
-            f"thread cannot be cancelled and still holds the GPU, so the "
-            f"worker must restart"
-        )
-
-    if "error" in box:
-        raise box["error"]
-    return box["result"]
+    return handle.result()
 
 
 def _explain(exc: Exception) -> str:

@@ -29,6 +29,14 @@ class AudioNotFound(VocalRemoveError):
     """The input audio file does not exist or could not be read."""
 
 
+class Cancelled(VocalRemoveError):
+    """The separation was stopped by Separation.cancel().
+
+    Deliberately NOT a SeparationError: nothing failed, the caller asked for
+    this, and a caller that cancels usually wants to tell the two apart.
+    """
+
+
 class SeparationError(VocalRemoveError):
     """Separation ran but did not produce the expected stems."""
 

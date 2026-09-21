@@ -4,9 +4,9 @@ One thread, one job at a time. Separation is GPU-bound and torch releases the
 GIL during inference, so a thread rather than a process keeps the loaded models
 reachable without any IPC - which is the whole reason init_models() exists.
 
-The tradeoff is that a compromised worker (see pipeline.WorkerCompromised)
-cannot be isolated from the web process; it stops accepting work and reports
-itself unhealthy, and the process has to be restarted to recover the GPU.
+The tradeoff is that separation is not isolated from the web process: anything
+that takes the separation thread down hard, a CUDA fault in particular, takes
+the server with it.
 """
 import logging
 import threading
@@ -41,7 +41,6 @@ class Worker:
         self.settings = settings
         self.models: Dict[str, vr.LoadedModel] = {}
         self.load_report: List[vr.LoadedModel] = []
-        self.compromised: Optional[str] = None
 
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
@@ -135,15 +134,9 @@ class Worker:
     def running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
 
-    @property
-    def healthy(self) -> bool:
-        return self.running and self.compromised is None
-
     def status(self) -> dict:
         return {
             "running": self.running,
-            "healthy": self.healthy,
-            "compromised": self.compromised,
             "models": [
                 {
                     "name": m.config.name,
@@ -169,25 +162,16 @@ class Worker:
                     self._wake.wait(timeout=_IDLE_POLL_SECONDS)
                     self._wake.clear()
                     continue
-                if not self._run_one(conn, job.id):
-                    return  # compromised; stop consuming the queue
+                self._run_one(conn, job.id)
         finally:
             conn.close()
             logger.info("worker loop exited")
 
-    def _run_one(self, conn, job_id: str) -> bool:
-        """Run one job. Returns False if the worker must stop."""
+    def _run_one(self, conn, job_id: str) -> None:
         try:
             done = pipeline.run_job(conn, job_id, self._client, self.models,
                                     self.settings)
             logger.info("job %s -> %s", job_id[:8], done.stage.value)
-            return True
-        except pipeline.WorkerCompromised as exc:
-            # The runaway separation thread still holds the GPU, so continuing
-            # would queue work behind something that may never finish.
-            self.compromised = str(exc)
-            logger.error("worker compromised, refusing further jobs: %s", exc)
-            return False
         except Exception:
             # run_job records its own failures; reaching here means the failure
             # handling itself broke. Keep the loop alive but do not retry the
@@ -198,4 +182,3 @@ class Worker:
                                   error="internal worker error")
             except Exception:
                 logger.exception("could not mark job %s failed", job_id)
-            return True
