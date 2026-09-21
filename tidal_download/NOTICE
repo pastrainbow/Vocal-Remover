@@ -1,0 +1,56 @@
+tidal_download
+==============
+
+Auth, metadata and stream resolution are provided by python-tidal (tidalapi),
+an actively maintained third-party library, installed as a normal dependency.
+
+This package additionally contains ONE modified file from Tidal-Media-Downloader
+  https://github.com/yaronzz/Tidal-Media-Downloader
+  Copyright (c) Yaronzz, licensed under the Apache License, Version 2.0.
+
+The original license is reproduced in LICENSE. Apache-2.0 section 4(b) requires
+prominent notice of modifications; this file records them.
+
+Vendored from TIDALDL-PY/tidal_dl @ f4854f4 into _vendor/:
+  decryption.py   (itself originally from the RedSea project)
+
+Modification: imports made relative. Upstream used flat, Python-2-style
+imports that required the package directory itself to be on sys.path.
+
+tidalapi resolves streams but does not decrypt them, which is why this one
+file remains.
+
+Why the rest was dropped
+------------------------
+The vendored tree originally covered auth, metadata, streaming, downloading and
+tagging (tidal.py, download.py, model.py, paths.py, settings.py, enums.py,
+apiKey.py, plus printf.py and lang/). All of it was removed in favour of
+tidalapi after its hardcoded API keys proved to be revoked for playback.
+
+Verified against one account and track, back to back:
+
+  * yaronzz keys - device login succeeds, /v1/sessions returns 200, the
+    subscription reports ACTIVE / PREMIUM / LOSSLESS / premiumAccess=true and
+    the track reports allowStreaming=true, yet EVERY playbackinfo request
+    returns 401 subStatus 4005 "Asset is not ready for playback" - at every
+    quality, and on both the prepaywall and postpaywall endpoints.
+    Key 4 (zU4XHVVkc2tDPo4t) is blocked by CloudFront at /token outright.
+  * tidalapi credentials - same account, same track, same minute: LOSSLESS,
+    HIGH and LOW all return a usable stream URL.
+
+Tidal has revoked playback for those leaked 2023-era client ids while leaving
+authentication working, which is why the failure looked like a hang rather than
+an auth error. Upstream's last functional commit was October 2023, so nothing
+there will be refreshed. Depending on a maintained library means credential
+rotations arrive as an upgrade rather than a hand-patch.
+
+Behaviour carried over deliberately
+-----------------------------------
+  * Quality.BEST walks MAX -> HIFI -> HIGH -> LOW and takes the highest rung
+    the account and track actually serve. Availability is tier-dependent: a
+    LOSSLESS-tier subscription returns 401 for MAX (HI_RES_LOSSLESS).
+  * MQA / "Master" is never requested. This is now structural rather than
+    guarded: tidalapi 0.8.x's Quality enum has no MQA member, where upstream
+    defaulted to it whenever an AudioQuality member was unmapped.
+  * poll_login() stays a single non-blocking check so a web request handler
+    never blocks for the lifetime of a device code.
