@@ -1,0 +1,69 @@
+# Single environment for the whole app: web API, Tidal downloader, GPU separation.
+#
+# Compile with:
+#   uv pip compile requirements/app.in -o requirements/app.lock \
+#       --python-version 3.11 --python-platform windows \
+#       --index-strategy unsafe-best-match --emit-index-url
+#
+# Install with (the strategy flag is required at SYNC time too, not just compile):
+#   uv venv venv --python 3.11
+#   uv pip sync requirements/app.lock --index-strategy unsafe-best-match
+#
+# ---------------------------------------------------------------------------
+# Both index settings below are load-bearing:
+#   * the explicit "+cu128" local version is the ONLY thing that stops uv
+#     resolving PyPI's CPU-only win_amd64 torch wheel. That wheel installs and
+#     runs fine - silently on CPU, ~10x slower, with no error anywhere.
+#   * --index-strategy unsafe-best-match is required because uv otherwise
+#     restricts torch to the first index that carries it, which is PyPI.
+# ---------------------------------------------------------------------------
+--index-url https://download.pytorch.org/whl/cu128
+--extra-index-url https://pypi.org/simple
+
+# --- GPU separation -------------------------------------------------------
+torch==2.8.0+cu128
+# torchvision arrives transitively via onnx2torch-py313; pinned to a matching
+# +cu128 build because a CPU torchvision beside a CUDA torch risks DLL/symbol
+# mismatches on Windows.
+torchvision==0.23.0+cu128
+
+# PIN, DO NOT FLOAT. onnxruntime-gpu 1.30.0 is built against CUDA 13 and cannot
+# see torch cu128's CUDA 12 DLLs; every .onnx model (all of MDX-Net) then falls
+# back to CPU *silently*. 1.22.0 is the CUDA 12 / cuDNN 9 build, matching the
+# DLLs torch already ships in torch/lib.
+# It also requires that `import torch` happens BEFORE any onnxruntime session is
+# created, so torch registers its DLL directory. That ordering is not
+# enforceable here - see the import comments in the worker.
+onnxruntime-gpu==1.22.0
+
+audio-separator[gpu]==0.47.0
+
+# --- Tidal downloader -----------------------------------------------------
+# python-tidal: maintained (0.8.x, Jan 2026) and, critically, tracks Tidal's
+# client credentials. The hardcoded keys in yaronzz/Tidal-Media-Downloader
+# (last real commit Oct 2023) have been revoked for playback - they still
+# authenticate, but every playbackinfo request returns 401 subStatus 4005.
+tidalapi>=0.8.11
+# Deps of the vendored tree in tidal_download/_vendor.
+# PyQt5 is deliberately absent: gui.py was not vendored.
+# prettytable/colorama are no longer needed either - upstream printf.py and the
+# lang/ tree were replaced by a logging shim (colorama still arrives via aigpy).
+# requests is NOT pinned to 2.31.0: that pin comes from tidal-dl's
+# requirements.txt, while its own setup.py only asks for >=2.22.0, and the hard
+# pin conflicts with tidalapi.
+requests>=2.22
+mutagen==1.45.1
+psutil==5.9.0
+pycryptodome==3.14.1
+aigpy==2022.7.8.1
+lyricsgenius==3.0.1
+pydub==0.25.1
+lxml
+
+# --- Web API --------------------------------------------------------------
+fastapi
+uvicorn[standard]
+pydantic-settings
+sse-starlette
+python-multipart
+httpx

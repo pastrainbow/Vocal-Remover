@@ -1,2 +1,9 @@
-data
+data/
 *.flac
+
+venv/
+__pycache__/
+*.pyc
+
+# Tidal config + OAuth token
+state/

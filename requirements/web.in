@@ -1,7 +1,0 @@
-# Web/API environment. Light, no GPU, no tidal-dl deps.
-fastapi
-uvicorn[standard]
-pydantic-settings
-sse-starlette
-python-multipart
-httpx
