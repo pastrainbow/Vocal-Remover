@@ -1,8 +1,9 @@
 """Typed exceptions.
 
-The vendored code signals failure by returning (ok, err_string) tuples and by
-raising bare Exception. Everything crossing this package's public boundary is
-translated into one of these instead.
+tidalapi surfaces failures as requests.HTTPError, bare Exception and library
+specific types. Everything crossing this package's public boundary is
+translated into one of these instead, so callers never import tidalapi to
+handle an error.
 """
 
 
@@ -12,14 +13,6 @@ class TidalError(Exception):
 
 class AuthError(TidalError):
     """No usable token: never logged in, or refresh failed."""
-
-
-class ApiKeyError(TidalError):
-    """The bundled API key was rejected.
-
-    These keys are hardcoded upstream and rot whenever Tidal rotates them.
-    Recovery is to try a different index; see TidalClient.list_api_keys().
-    """
 
 
 class LoginTimeout(TidalError):
@@ -35,4 +28,8 @@ class NotFound(TidalError):
 
 
 class DownloadError(TidalError):
-    """Stream fetch, decrypt, or tagging failed."""
+    """No quality was available, or the stream could not be fetched.
+
+    Also raised for an encrypted stream: decryption support was removed as
+    unused, so fetch() refuses rather than writing an unplayable file.
+    """

@@ -1,24 +1,27 @@
 """Plain dataclasses for everything crossing the public API boundary.
 
-Callers never touch the vendored aigpy model objects, so the vendored tree
+Callers never touch tidalapi's own model objects, so the library underneath
 stays replaceable without breaking the web app.
 """
+import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import List, Optional
 
 
 class Quality(str, Enum):
-    """Audio quality, mapped onto the vendored AudioQuality enum.
+    """Audio quality, mapped onto tidalapi.Quality in client.py.
 
     BEST is the default: take the highest quality Tidal will actually serve
     for a given track, walking down MAX -> HIFI -> HIGH -> LOW and stopping at
-    the first that works. Availability varies per track and per API key, so a
-    fixed quality fails on tracks that a lower rung would have served.
+    the first that works. Availability varies by track and by subscription
+    tier - a LOSSLESS-tier account is refused MAX - so a fixed quality fails
+    where a lower rung would have succeeded.
 
-    MQA ("Master", Tidal's HI_RES) is deliberately absent and is refused in the
-    vendored getStreamUrl. It is a lossy-encoded format that separation models
-    gain nothing from; MAX (HI_RES_LOSSLESS) is true hi-res FLAC.
+    MQA ("Master", Tidal's HI_RES) is deliberately absent. It is a
+    lossy-encoded format that separation models gain nothing from, while MAX
+    (HI_RES_LOSSLESS) is true hi-res FLAC. This is structural rather than
+    guarded: tidalapi 0.8.x has no MQA member to map onto.
     """
 
     LOW = "LOW"      # AAC ~96k
@@ -37,9 +40,6 @@ class AuthState:
     valid: bool
     user_id: Optional[int] = None
     country_code: Optional[str] = None
-    expires_in: Optional[int] = None  # seconds; negative means expired
-    api_key_index: Optional[int] = None
-    api_key_platform: Optional[str] = None
     detail: str = ""
 
 
@@ -60,22 +60,11 @@ class DeviceLogin:
 
     @property
     def seconds_left(self) -> int:
-        import time
-
         return max(0, int(self.expires_at - time.time()))
 
     @property
     def expired(self) -> bool:
         return self.seconds_left <= 0
-
-
-@dataclass(frozen=True)
-class ApiKeyInfo:
-    index: int
-    platform: str
-    formats: str
-    valid: bool
-    current: bool
 
 
 @dataclass(frozen=True)

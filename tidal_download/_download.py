@@ -4,18 +4,26 @@ tidalapi resolves metadata and hands back a StreamManifest, but stops there:
 it does not download, decrypt or tag. That is this module's job.
 
 Two manifest shapes exist:
-  * BTS  - a single URL, occasionally AES-CTR encrypted (encryption_key set)
+  * BTS  - a single URL
   * MPD  - an MPEG-DASH segment list that must be concatenated in order
+
+Encrypted BTS streams are NOT supported. Tidal can in principle set
+encryptionType on a BTS manifest, but it has not been observed for the
+qualities this project uses, and carrying an AES-CTR implementation for an
+unobserved case meant vendoring Apache-2.0 code and a pycryptodome dependency.
+fetch() raises rather than writing a file that would be silently unplayable.
 """
 import logging
 import os
-import tempfile
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Callable, Optional
 
+import mutagen
 import requests
 
-from ._vendor.decryption import decrypt_file, decrypt_security_token
+from . import errors
 from .models import Progress
 
 logger = logging.getLogger("tidal_download")
@@ -75,71 +83,84 @@ def fetch(manifest, dest: Path,
                             logger.exception("progress callback raised")
 
     if getattr(manifest, "is_encrypted", False) and manifest.encryption_key:
-        logger.debug("decrypting AES-CTR stream")
-        key, nonce = decrypt_security_token(manifest.encryption_key)
-        tmp = part.with_suffix(part.suffix + ".dec")
-        decrypt_file(str(part), str(tmp), key, nonce)
-        os.replace(tmp, part)
+        part.unlink(missing_ok=True)
+        raise errors.DownloadError(
+            f"this stream is encrypted (type="
+            f"{getattr(manifest, 'encryption_type', '?')}) and decryption support "
+            f"was removed as unused. Reinstate an AES-CTR decrypt step in "
+            f"_download.fetch() if this starts appearing."
+        )
 
     os.replace(part, dest)
     return dest
 
 
-def tag(path: Path, info, cover_bytes: Optional[bytes] = None) -> None:
-    """Write metadata. Best-effort: a tagging failure must not lose the audio."""
+def remux_if_needed(path: Path, codecs: str) -> Path:
+    """Put a FLAC stream in a .flac container.
+
+    Tidal delivers hi-res FLAC inside an MP4/M4A container, so the file
+    arrives as .m4a while actually containing FLAC. That misrepresents the
+    content to anything downstream that trusts the extension. `-c:a copy` is a
+    container change only - no re-encode, no quality loss, ~0.1s for a track.
+
+    Returns the new path, or the original if no remux was needed or possible.
+    """
+    if "FLAC" not in str(codecs).upper():
+        return path
+    if path.suffix.lower() not in (".m4a", ".mp4"):
+        return path
+    if not shutil.which("ffmpeg"):
+        logger.warning("ffmpeg not found; leaving FLAC inside %s", path.suffix)
+        return path
+
+    target = path.with_suffix(".flac")
+    try:
+        subprocess.run(
+            ["ffmpeg", "-v", "error", "-i", str(path),
+             "-map", "0:a", "-c:a", "copy", "-y", str(target)],
+            check=True, capture_output=True, timeout=300,
+        )
+    except Exception as exc:
+        logger.warning("remux to .flac failed (%s); keeping %s", exc, path.name)
+        target.unlink(missing_ok=True)
+        return path
+
+    path.unlink(missing_ok=True)
+    logger.debug("remuxed %s -> %s", path.name, target.name)
+    return target
+
+
+def tag(path: Path, info) -> None:
+    """Write metadata using mutagen's format-agnostic interface.
+
+    `easy=True` maps a common key set onto whatever the container actually
+    uses - Vorbis comments for FLAC, MP4 atoms for m4a - so there is no need
+    for per-format branches here. Verified to round-trip title, multi-value
+    artist, album and tracknumber identically on both.
+
+    Cover art and ISRC are deliberately not written: neither is expressible
+    through the easy interface (EasyMP4 rejects `isrc` outright), and
+    supporting them would reintroduce exactly the per-format code this
+    replaces. The source file is an intermediate fed to the separation stage,
+    and TrackInfo already carries `cover_url` and `isrc` for any UI that wants
+    them.
+
+    Best-effort: a tagging failure must never lose the audio.
+    """
     path = Path(path)
     try:
-        if path.suffix.lower() == ".flac":
-            _tag_flac(path, info, cover_bytes)
-        elif path.suffix.lower() in (".m4a", ".mp4"):
-            _tag_mp4(path, info, cover_bytes)
-        else:
-            logger.debug("no tagger for %s, leaving untagged", path.suffix)
+        audio = mutagen.File(str(path), easy=True)
+        if audio is None:
+            logger.debug("mutagen has no handler for %s, leaving untagged",
+                         path.suffix)
+            return
+        audio["title"] = info.title or ""
+        audio["artist"] = info.artists or [info.artist or ""]
+        if info.album:
+            audio["album"] = info.album
+        if info.track_number:
+            audio["tracknumber"] = str(info.track_number)
+        audio.save()
     except Exception:
         logger.warning("tagging failed for %s (audio is intact)", path.name,
                        exc_info=True)
-
-
-def _tag_flac(path, info, cover_bytes):
-    from mutagen.flac import FLAC, Picture
-
-    audio = FLAC(str(path))
-    audio["title"] = info.title or ""
-    audio["artist"] = info.artists or [info.artist or ""]
-    if info.album:
-        audio["album"] = info.album
-    if info.track_number:
-        audio["tracknumber"] = str(info.track_number)
-    if info.isrc:
-        audio["isrc"] = info.isrc
-    if cover_bytes:
-        pic = Picture()
-        pic.type, pic.mime, pic.data = 3, "image/jpeg", cover_bytes
-        audio.add_picture(pic)
-    audio.save()
-
-
-def _tag_mp4(path, info, cover_bytes):
-    from mutagen.mp4 import MP4, MP4Cover
-
-    audio = MP4(str(path))
-    audio["\xa9nam"] = info.title or ""
-    audio["\xa9ART"] = ", ".join(info.artists) if info.artists else (info.artist or "")
-    if info.album:
-        audio["\xa9alb"] = info.album
-    if info.track_number:
-        audio["trkn"] = [(int(info.track_number), 0)]
-    if cover_bytes:
-        audio["covr"] = [MP4Cover(cover_bytes, imageformat=MP4Cover.FORMAT_JPEG)]
-    audio.save()
-
-
-def fetch_cover(url: Optional[str]) -> Optional[bytes]:
-    if not url:
-        return None
-    try:
-        r = requests.get(url, timeout=30)
-        r.raise_for_status()
-        return r.content
-    except Exception:
-        return None

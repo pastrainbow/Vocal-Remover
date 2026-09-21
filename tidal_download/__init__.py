@@ -12,8 +12,8 @@
     res = client.download(url, "data/staging/job123", quality=Quality.HIFI)
     print(res.path)
 
-The vendored upstream tree lives in _vendor/ and is Apache-2.0; see NOTICE for
-the modifications made to it.
+Auth, metadata and stream resolution come from python-tidal (tidalapi);
+downloading and tagging are in _download.py. No vendored code.
 """
 from .client import TidalClient
 from .errors import (
