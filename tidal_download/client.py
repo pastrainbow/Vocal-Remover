@@ -22,6 +22,7 @@ import tidalapi
 
 from . import errors
 from ._download import build_filename, fetch, remux_if_needed, tag
+from .login import LoginFlow
 from .models import (
     AuthState,
     DeviceLogin,
@@ -84,6 +85,9 @@ class TidalClient:
         self.config_dir = Path(config_dir)
         self.config_dir.mkdir(parents=True, exist_ok=True)
         self.session_file = self.config_dir / "session.json"
+        # Built on first use: most callers only ever load a stored session,
+        # and an unused flow should not cost a lock and an object.
+        self._login: Optional[LoginFlow] = None
 
         self.session = tidalapi.Session()
         try:
@@ -115,6 +119,24 @@ class TidalClient:
         user = getattr(self.session, "user", None)
         return AuthState(True, getattr(user, "id", None),
                          self.session.country_code, detail=detail)
+
+    @property
+    def login(self) -> LoginFlow:
+        """The device-code flow for this client, driven in the background.
+
+        For callers that cannot sit in a polling loop - a web app, a GUI:
+
+            status = client.login.begin()      # returns at once, with a code
+            print(status.verification_url, status.user_code)
+            ...
+            client.login.status().stage        # pending -> ok / expired
+
+        A terminal can skip this and drive begin_login() / poll_login()
+        itself.
+        """
+        if self._login is None:
+            self._login = LoginFlow(self)
+        return self._login
 
     def begin_login(self) -> DeviceLogin:
         """Start the device-code flow; show the result to the user."""
@@ -157,6 +179,18 @@ class TidalClient:
         return self._ok("logged in")
 
     def logout(self) -> None:
+        """Delete the stored session and drop the live one.
+
+        Abandons a login still in flight first, then deletes: without that, a
+        code approved after this call would write the session file straight
+        back and leave the caller logged in again. Doing it in that order also
+        means a poll already in flight - which saves as soon as it sees an
+        approval - writes the file before the unlink rather than after. It
+        narrows that race rather than closing it: a poll can still land
+        between the unlink and the thread noticing it has been abandoned.
+        """
+        if self._login is not None:
+            self._login.reset()
         self.session_file.unlink(missing_ok=True)
         self.session = tidalapi.Session()
 

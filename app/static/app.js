@@ -71,14 +71,14 @@ async function fetchLogin() {
   try {
     return await (await fetch("/api/login")).json();
   } catch {
-    return { state: "idle", detail: "" };
+    return { stage: "idle", detail: "" };
   }
 }
 
 function showLogin(login) {
   const box = el("auth-warning");
 
-  if (login.state === "pending") {
+  if (login.stage === "pending") {
     box.replaceChildren(
       node("strong", "", "Finish signing in to Tidal:"),
       loginLink(login.verification_url),
@@ -92,7 +92,7 @@ function showLogin(login) {
   }
 
   stopLoginPoll();
-  const failed = login.state === "expired" || login.state === "error";
+  const failed = login.stage === "expired" || login.stage === "error";
   box.replaceChildren(
     node("strong", "", failed
       ? `Sign-in did not finish — ${login.detail}`
@@ -112,9 +112,9 @@ async function startLogin(event) {
     const body = await response.json();
     showLogin(response.ok
       ? body
-      : { state: "error", detail: body.detail || `failed (${response.status})` });
+      : { stage: "error", detail: body.detail || `failed (${response.status})` });
   } catch (err) {
-    showLogin({ state: "error", detail: String(err) });
+    showLogin({ stage: "error", detail: String(err) });
   }
 }
 
@@ -122,7 +122,7 @@ function startLoginPoll() {
   if (loginTimer) return;
   loginTimer = setInterval(async () => {
     const login = await fetchLogin();
-    if (login.state === "ok") {
+    if (login.stage === "ok") {
       stopLoginPoll();
       await loadHealth();  // clears the banner and enables Separate
       return;

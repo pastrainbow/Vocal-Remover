@@ -15,7 +15,6 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from .api import router
-from .auth import LoginFlow
 from .config import get_settings
 from .worker import Worker
 
@@ -36,11 +35,6 @@ async def lifespan(app: FastAPI):
     # useful this server can do, and starting anyway would only turn a clear
     # startup error into a stream of failed jobs.
     worker.start()
-
-    # After start(), which is where the Tidal session is built. The login
-    # flow drives that same session, so signing in from the page is enough
-    # for the worker to start downloading - there is nothing to reload.
-    app.state.login = LoginFlow(worker.client)
 
     try:
         yield

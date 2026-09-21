@@ -9,6 +9,13 @@
         while client.poll_login(dev) is None:     # non-blocking, caller paces
             time.sleep(dev.interval)
 
+Somewhere that cannot sit in that loop - a web request handler, a UI thread -
+uses client.login instead, which runs it on a thread and answers instantly:
+
+    status = client.login.begin()                # returns with a code
+    status = client.login.status()               # poll this as often as you like
+    status.stage                                 # pending -> ok / expired / error
+
     info = client.resolve(url)                   # metadata, no download
     res = client.download(url, "data/staging/job123")
     print(res.path)                              # quality defaults to BEST
@@ -25,6 +32,7 @@ from .errors import (
     TidalError,
     UnsupportedUrl,
 )
+from .login import LoginFlow, LoginStage, LoginStatus
 from .models import (
     AuthState,
     DeviceLogin,
@@ -37,6 +45,9 @@ from .models import (
 
 __all__ = [
     "TidalClient",
+    "LoginFlow",
+    "LoginStage",
+    "LoginStatus",
     "Quality",
     "QUALITY_LADDER",
     "AuthState",

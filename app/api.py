@@ -18,7 +18,6 @@ from sse_starlette.sse import EventSourceResponse
 import tidal_download as td
 
 from . import db, jobs as jobs_repo
-from .auth import LoginFlow
 from .config import Settings
 from .worker import Worker
 
@@ -40,8 +39,14 @@ def get_worker(request: Request) -> Worker:
     return request.app.state.worker
 
 
-def get_login(request: Request) -> LoginFlow:
-    return request.app.state.login
+def get_login(request: Request) -> td.LoginFlow:
+    """The worker's Tidal session drives the login, so signing in from the
+    page is all the worker needs - there is nothing to hand over."""
+    worker = request.app.state.worker
+    if worker.client is None:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE,
+                            "worker is not running; restart the server")
+    return worker.client.login
 
 
 def get_settings_dep(request: Request) -> Settings:
@@ -110,7 +115,7 @@ def list_models(worker: Worker = Depends(get_worker)):
 
 
 @router.post("/login", status_code=status.HTTP_202_ACCEPTED)
-def start_login(flow: LoginFlow = Depends(get_login)):
+def start_login(flow: td.LoginFlow = Depends(get_login)):
     """Ask Tidal for a device code, and start waiting for it to be approved.
 
     Returns straight away with the code to show; approval is reported by
@@ -125,25 +130,24 @@ def start_login(flow: LoginFlow = Depends(get_login)):
 
 
 @router.get("/login")
-def login_status(flow: LoginFlow = Depends(get_login)):
+def login_status(flow: td.LoginFlow = Depends(get_login)):
     """Where the login has got to. Cheap: it only reads state, never polls."""
     return flow.status()
 
 
 @router.post("/logout")
-def logout(worker: Worker = Depends(get_worker),
-           flow: LoginFlow = Depends(get_login)):
+def logout(worker: Worker = Depends(get_worker)):
     """Delete the stored Tidal session and drop the live one.
 
     Removes state/tidal/session.json, so signing back in means approving a
     new device code. A job already downloading will fail with an auth error -
-    the session it was using has gone.
+    the session it was using has gone. Abandoning a login still in flight is
+    part of logout() itself.
     """
     if worker.client is None:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE,
                             "worker is not running; restart the server")
     worker.client.logout()
-    flow.reset()
     logger.info("tidal session cleared")
     return {"authenticated": False}
 
