@@ -1,0 +1,30 @@
+# GPU separation environment.  Compile with:
+#   uv pip compile requirements/uvr.in -o requirements/uvr.lock \
+#       --python-version 3.11 --python-platform windows \
+#       --index-strategy unsafe-best-match --emit-index-url
+#
+# Both index flags are load-bearing:
+#   * the explicit "+cu128" local version is the ONLY thing that stops uv
+#     resolving PyPI's CPU-only win_amd64 torch wheel (it installs and runs
+#     fine, just silently on CPU);
+#   * --index-strategy unsafe-best-match is required because uv otherwise
+#     restricts torch to the first index that carries it, which is PyPI.
+#     The same flag is needed again at `uv pip sync` time.
+# torchvision is pinned to a matching +cu128 build: it arrives transitively
+# via onnx2torch-py313, and a CPU torchvision beside a CUDA torch risks
+# DLL/symbol mismatches on Windows.
+--index-url https://download.pytorch.org/whl/cu128
+--extra-index-url https://pypi.org/simple
+
+torch==2.8.0+cu128
+torchvision==0.23.0+cu128
+
+# PIN, DO NOT FLOAT. onnxruntime-gpu 1.30.0 is built against CUDA 13 and
+# cannot see torch cu128's CUDA 12 DLLs; every .onnx model then falls back
+# to CPU *silently* - no exception, just ~10x slower. 1.22.0 is the CUDA 12 /
+# cuDNN 9 build, which matches the DLLs torch already ships in torch/lib.
+# It also requires that `import torch` happens BEFORE the ORT session is
+# created, so torch registers its DLL directory.
+onnxruntime-gpu==1.22.0
+
+audio-separator[gpu]==0.47.0
