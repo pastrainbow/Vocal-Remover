@@ -2,8 +2,8 @@
 
 Two public functions:
 
-    models = init_models([ModelConfig(name="a.ckpt"),
-                          ModelConfig(name="b.onnx")])            # once
+    models = init_models([ModelConfig(name="a.ckpt", model_dir=d),
+                          ModelConfig(name="b.onnx", model_dir=d)])  # once
     job = separate("song.flac", models[0],
                    SeparationConfig(output_dir="out/job1"))       # returns now
     job.get_progress()                                            # 0.0 - 1.0

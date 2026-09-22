@@ -39,19 +39,9 @@ kwargs at the call site in separator.py rather than rebuilding a settings
 surface here.
 """
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
-
-#: The repo root: src/vocal_remove/config.py -> src/vocal_remove -> src ->
-#: here. Models and output land in data/, which sits beside src/.
-_ROOT = Path(__file__).resolve().parents[2]
-
-#: Where models are downloaded to and loaded from, unless a caller says
-#: otherwise. Public because setup/fetch_models.py needs the path without
-#: having a model in hand, and deriving it a second time is how a prefetch
-#: ends up filling a directory the server never reads.
-DEFAULT_MODEL_DIR = _ROOT / "data" / "models"
 
 
 @dataclass(frozen=True)
@@ -62,10 +52,17 @@ class ModelConfig:
     in this project - app.config.PRELOAD_MODELS - and a default here would
     be a second, quieter one: a caller that forgot to say which model would
     silently load whichever this module happened to name.
+
+    `model_dir` has none for the same reason. app.Settings.models_dir is the
+    one place that decides it, honouring DATA_DIR; a default derived from
+    this file's location would always be <source tree>/data/models, which is
+    wrong wherever the source tree is not the installation (a CI runner's
+    workspace, say), and a caller that forgot to pass it would load from -
+    and download into - a directory nothing else reads.
     """
 
     name: str
-    model_dir: Path = field(default_factory=lambda: DEFAULT_MODEL_DIR)
+    model_dir: Path
 
     #: Mixed precision. Roughly halves VRAM with no audible cost.
     #: Ignored by ONNX models, which run at their native precision.
@@ -84,9 +81,14 @@ class ModelConfig:
 
 @dataclass(frozen=True)
 class SeparationConfig:
-    """Per-job output settings. None of this requires a model reload."""
+    """Per-job output settings. None of this requires a model reload.
 
-    output_dir: Path = field(default_factory=lambda: _ROOT / "data" / "out")
+    `output_dir` has no default, like ModelConfig.model_dir: where output
+    goes is app.Settings' decision, and each job gets its own directory
+    under it anyway.
+    """
+
+    output_dir: Path
 
     #: WAV is lossless and instant to write; FLAC is lossless and ~40% smaller
     #: but costs encode time. Separation output is float32 internally, so

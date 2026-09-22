@@ -51,8 +51,8 @@ class TestLazySeparatorImport(unittest.TestCase):
         out = _run(
             "import sys\n"
             "import vocal_remove as vr\n"
-            "vr.ModelConfig(name='foo.onnx')\n"
-            "vr.SeparationConfig()\n"
+            "vr.ModelConfig(name='foo.onnx', model_dir='models')\n"
+            "vr.SeparationConfig(output_dir='out')\n"
             "print('torch' in sys.modules)\n"
         )
         self.assertEqual(out, "False")

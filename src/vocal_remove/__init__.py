@@ -2,7 +2,8 @@
 
     from vocal_remove import init_models, separate, ModelConfig, SeparationConfig
 
-    models = init_models([ModelConfig(name="...ckpt")])  # a list in, list out
+    models = init_models([ModelConfig(name="...ckpt",    # a list in, list out
+                                      model_dir="data/models")])
     model = models[0]
     if model.ok:
         job = separate("song.flac", model,
@@ -31,7 +32,7 @@ names below pulls .separator in, on first use.
 """
 from importlib import import_module
 
-from .config import DEFAULT_MODEL_DIR, ModelConfig, SeparationConfig
+from .config import ModelConfig, SeparationConfig
 from .errors import (
     AudioNotFound,
     Cancelled,
@@ -80,7 +81,6 @@ __all__ = [
     # config
     "ModelConfig",
     "SeparationConfig",
-    "DEFAULT_MODEL_DIR",
     # errors
     "VocalRemoveError",
     "ModelLoadError",

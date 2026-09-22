@@ -5,8 +5,8 @@ for the ~0.7 GiB: now, or during the first job. Already-cached models are
 left alone.
 
 Run by ./run.sh on every start, inside the venv, after the packages are
-installed - it needs audio-separator, and it writes into data/models, which
-is where vocal_remove.ModelConfig looks by default.
+installed - it needs audio-separator, and it writes into
+app.Settings.models_dir, which is where the worker points ModelConfig.
 
 Two things make running this *before* starting the server worth the trouble,
 rather than letting the first startup do it:
@@ -22,11 +22,10 @@ rather than letting the first startup do it:
 """
 import sys
 from pathlib import Path
+from typing import Optional
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
-
-from vocal_remove import DEFAULT_MODEL_DIR  # noqa: E402
 
 
 def _wanted() -> list:
@@ -54,15 +53,15 @@ def _snapshot(model_dir: Path) -> set:
     return {p for p in model_dir.rglob("*") if p.is_file()}
 
 
-def _model_dir() -> Path:
-    """Where the server will actually look for models.
+def _model_dir() -> Optional[Path]:
+    """Where the server will actually look for models, or None.
 
-    DEFAULT_MODEL_DIR is derived from vocal_remove/config.py's own
-    location, so it is always <source tree>/data/models. That is wrong
-    wherever the source tree is not the installation - notably under a CI
-    runner, which checks out into its own workspace and would otherwise
-    prefetch into a directory the deployed server never reads. app.Settings
-    honours DATA_DIR, so ask it first.
+    app.Settings.models_dir is the only answer, for the same reason as
+    _wanted(): it honours DATA_DIR, and anything derived here instead - say
+    <source tree>/data/models - is wrong wherever the source tree is not the
+    installation, notably under a CI runner, which checks out into its own
+    workspace and would prefetch into a directory the deployed server never
+    reads. If it will not import, fetch nothing.
     """
     try:
         from app.config import get_settings
@@ -70,14 +69,17 @@ def _model_dir() -> Path:
         return get_settings().models_dir
     except Exception as exc:  # noqa: BLE001 - a helper, never a blocker
         print(f"  [warn] could not read models_dir ({type(exc).__name__}: "
-              f"{exc}); falling back to the source-tree default")
-    return DEFAULT_MODEL_DIR
+              f"{exc}); skipping the prefetch - the models will download on "
+              f"first use instead")
+        return None
 
 
 def main() -> int:
     from audio_separator.separator import Separator
 
     model_dir = _model_dir()
+    if model_dir is None:
+        return 0
     model_dir.mkdir(parents=True, exist_ok=True)
     print(f"  into {model_dir}")
 
