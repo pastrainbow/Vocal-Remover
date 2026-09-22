@@ -40,6 +40,45 @@ $Health  = "http://127.0.0.1:$Port/api/health"
 function Say($msg) { Write-Host "==> $msg" -ForegroundColor Cyan }
 function Die($msg) { Write-Host "!!! $msg" -ForegroundColor Red; exit 1 }
 
+function Get-GitBash {
+    # Resolve Git Bash by path, never by a PATH lookup.
+    #
+    # On Windows `bash` resolves to C:\Windows\System32\bash.exe - the WSL
+    # launcher - which ships with the OS and takes precedence over Git Bash,
+    # and Git for Windows does not put its own bash on PATH at all. Calling
+    # plain `bash` therefore runs run.sh under WSL, which on a machine without
+    # virtualisation fails with HCS_E_HYPERV_NOT_INSTALLED, and on a machine
+    # WITH it would be worse: run.sh would half-work against a Linux
+    # filesystem view and a venv it cannot execute.
+    # Built from bases that can legitimately be unset - Join-Path throws on a
+    # null base, which under Actions' stop preference would fail the deploy
+    # rather than move on to the next candidate.
+    $bases = @(
+        @($env:ProgramFiles,              'Git\bin\bash.exe'),
+        @(${env:ProgramFiles(x86)},       'Git\bin\bash.exe'),
+        @($env:LOCALAPPDATA,              'Programs\Git\bin\bash.exe')
+    )
+    $candidates = @()
+    foreach ($b in $bases) {
+        if ($b[0]) { $candidates += (Join-Path $b[0] $b[1]) }
+    }
+    # Derive from git.exe too, which covers a non-standard install location:
+    # ...\Git\cmd\git.exe -> ...\Git\bin\bash.exe
+    $git = Get-Command git.exe -ErrorAction SilentlyContinue
+    if ($git) {
+        $candidates += (Join-Path (Split-Path (Split-Path $git.Source)) 'bin\bash.exe')
+    }
+
+    foreach ($c in $candidates) {
+        if ($c -and (Test-Path $c)) { return $c }
+    }
+    Die ('Git Bash not found - looked in: ' + ($candidates -join '; ') +
+         '. Install Git for Windows; the System32 bash.exe is WSL and ' +
+         'cannot run run.sh.')
+}
+
+$Bash = Get-GitBash
+
 # ---------------------------------------------------------------------- stop
 
 function Stop-App {
@@ -76,8 +115,8 @@ function Sync-Env {
     # which builds a real ONNX Runtime session rather than trusting
     # get_available_providers(). It exits 1 on a CPU-only torch or a dead
     # CUDA provider - exactly the silent-degradation cases worth failing on.
-    Say 'run.sh --check (install if needed, then verify)'
-    & bash './run.sh' '--check'
+    Say "run.sh --check (install if needed, then verify) [$Bash]"
+    & $Bash './run.sh' '--check'
     if ($LASTEXITCODE -ne 0) { Die "environment check failed (exit $LASTEXITCODE)" }
 }
 
@@ -97,7 +136,7 @@ function Get-Models {
     # process waiting to be killed, and setup/fetch_models.py removes its own
     # partial files if it fails anyway.
     Say 'run.sh --models (warm the model cache)'
-    & bash './run.sh' '--models'
+    & $Bash './run.sh' '--models'
     # Deliberately not fatal: a cached model with a dead network is still a
     # perfectly deployable box, and startup will fail loudly if it is not.
     if ($LASTEXITCODE -ne 0) {
