@@ -106,31 +106,98 @@ $Bash = Get-GitBash
 
 # ---------------------------------------------------------------------- stop
 
-function Stop-App {
-    if (-not (Test-Path $PidFile)) { Say 'no pid file, nothing to stop'; return }
-
-    $appPid = (Get-Content $PidFile -Raw).Trim()
-    $proc   = Get-Process -Id $appPid -ErrorAction SilentlyContinue
-
-    if ($null -eq $proc) {
-        Say "pid $appPid is not running (stale pid file)"
+function Get-PortOwners {
+    # Pids listening on $Port. Get-NetTCPConnection exists on Windows 8 and
+    # Server 2012 onward; netstat is the fallback and parses the last column
+    # of a LISTENING line.
+    $pids = @()
+    try {
+        $pids = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction Stop |
+                  Select-Object -ExpandProperty OwningProcess -Unique)
     }
-    else {
-        # The pid file survives reboots, and Windows reuses pids. Starting
-        # with a clean check that this is actually our python avoids killing
-        # whatever unrelated process inherited the number.
+    catch [System.Management.Automation.CommandNotFoundException] {
+        $pids = @(netstat -ano -p TCP |
+                  Select-String -Pattern "LISTENING" |
+                  Select-String -Pattern ":$Port\s" |
+                  ForEach-Object { ($_ -split '\s+')[-1] } |
+                  Select-Object -Unique)
+    }
+    catch {
+        # No listener at all throws rather than returning empty. Not an error.
+        $pids = @()
+    }
+    return @($pids | Where-Object { $_ -and $_ -ne 0 })
+}
+
+function Stop-PortHolders {
+    # The pid file is not enough on its own. It is absent on a fresh state
+    # directory, it never knew about a server someone started by hand, and a
+    # previous deploy can leave an orphan the file no longer names. The port
+    # is the authority on what must go - a leftover listener is exactly the
+    # WinError 10048 that this whole function exists to prevent.
+    foreach ($holderPid in Get-PortOwners) {
+        $proc = Get-Process -Id $holderPid -ErrorAction SilentlyContinue
+        if ($null -eq $proc) { continue }
+
         if ($proc.ProcessName -notmatch '^python') {
-            Say "pid $appPid is '$($proc.ProcessName)', not python - refusing to kill it"
+            # Deliberately fatal rather than killing it. Something that is not
+            # our server owning this port is a misconfiguration, and a deploy
+            # script that silently kills unknown processes is worse than one
+            # that stops and says which process to look at.
+            Die ("port $Port is held by pid $holderPid ('$($proc.ProcessName)'), " +
+                 'which is not this app. Refusing to kill it - free the port ' +
+                 'or set a different PORT.')
+        }
+
+        Say "stopping pid $holderPid ('$($proc.ProcessName)') holding port $Port"
+        Stop-Process -Id $holderPid -Force -ErrorAction SilentlyContinue
+        $proc.WaitForExit(30000) | Out-Null
+    }
+}
+
+function Wait-PortFree {
+    # Killing the process does not free the socket instantly, and binding a
+    # port still held by a dying process is the same 10048 by another route.
+    $deadline = (Get-Date).AddSeconds(30)
+    while ((Get-Date) -lt $deadline) {
+        if ((Get-PortOwners).Count -eq 0) { return }
+        Start-Sleep -Milliseconds 500
+    }
+    Die "port $Port is still in use after 30s"
+}
+
+function Stop-App {
+    # Pid file first: it identifies our own process precisely, including the
+    # case where it is somehow not listening yet.
+    if (Test-Path $PidFile) {
+        $appPid = (Get-Content $PidFile -Raw).Trim()
+        $proc   = Get-Process -Id $appPid -ErrorAction SilentlyContinue
+
+        if ($null -eq $proc) {
+            Say "pid $appPid is not running (stale pid file)"
+        }
+        # The pid file survives reboots and Windows reuses pids, so check the
+        # number still belongs to a python before killing it.
+        elseif ($proc.ProcessName -notmatch '^python') {
+            Say "pid $appPid is '$($proc.ProcessName)', not python - leaving it alone"
         }
         else {
-            Say "stopping pid $appPid"
-            Stop-Process -Id $appPid -Force
-            # The worker holds CUDA context and a SQLite WAL; give the OS a
+            Say "stopping pid $appPid (from pid file)"
+            Stop-Process -Id $appPid -Force -ErrorAction SilentlyContinue
+            # The worker holds a CUDA context and a SQLite WAL; give the OS a
             # moment to tear both down before the next process claims them.
             $proc.WaitForExit(30000) | Out-Null
         }
+        Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
     }
-    Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
+    else {
+        Say 'no pid file'
+    }
+
+    # Then the port, which catches everything the pid file cannot know about.
+    Stop-PortHolders
+    Wait-PortFree
+    Say "port $Port is free"
 }
 
 # --------------------------------------------------------------- sync/verify
