@@ -1,0 +1,4 @@
+# Shell scripts must keep LF endings even on Windows: git's autocrlf would
+# otherwise check run.sh out with CRLF, and bash fails on the \r with
+# "bad interpreter" or "command not found".
+*.sh text eol=lf
