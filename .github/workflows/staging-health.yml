@@ -39,6 +39,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           clean: false
+          # Matches deploy-staging.yml. Both workflows check out into the same
+          # runner workspace, so differing depths would make each run undo the
+          # other's fetch.
+          fetch-depth: 0
 
       - name: Is the app healthy?
         id: health
@@ -80,7 +84,13 @@ jobs:
             exit 0
           }
 
-          $status = & $ts serve status 2>&1 | Out-String
+          # No 2>&1: under Windows PowerShell a native command's redirected
+          # stderr becomes an ErrorRecord, and $ErrorActionPreference is stop
+          # in Actions, so a single stderr line would fail the step. Letting
+          # stderr through to the log unredirected is both safer and more
+          # readable.
+          $status = & $ts serve status | Out-String
+          $global:LASTEXITCODE = 0
           if ($status -match '127\.0\.0\.1:8000') {
             Write-Host 'tailscale serve is configured'
             exit 0

@@ -95,15 +95,37 @@ jobs:
         uses: actions/checkout@v4
         with:
           clean: false
+          # fetch-depth 0, not the default 1: the rollback step needs an older
+          # commit to actually exist locally, and a depth-1 clone contains
+          # exactly one. Cheap here - the repo is source only, and with
+          # clean: false the fetch is incremental after the first run.
+          fetch-depth: 0
 
-      - name: Record current revision
+      - name: Record rollback target
         id: previous
         shell: powershell
         run: |
-          # Written before anything changes, so the rollback step below has
-          # somewhere to go back to.
-          $prev = git rev-parse HEAD~1 2>$null
-          if (-not $prev) { $prev = '' }
+          # The last commit that reached a healthy health check, recorded by
+          # the step at the end of this job. HEAD~1 was the wrong target: the
+          # parent commit is not necessarily the one running on the box, and
+          # after a failed deploy it is the commit that just failed.
+          $prev = ''
+          if (Test-Path 'state\deployed-sha') {
+            $prev = (Get-Content 'state\deployed-sha' -Raw).Trim()
+          }
+          if (-not $prev) {
+            # Nothing recorded yet - first deploy after adding this, or a
+            # fresh box. --verify --quiet writes nothing to stderr and exits
+            # non-zero if the revision is missing, which is the one form that
+            # is safe here; `git ... 2>$null` under Windows PowerShell wraps
+            # stderr in an ErrorRecord and, with $ErrorActionPreference stop,
+            # fails the step outright. That is what broke this step before.
+            $p = git rev-parse --verify --quiet HEAD~1
+            if ($LASTEXITCODE -eq 0 -and $p) { $prev = $p.Trim() }
+            $global:LASTEXITCODE = 0
+          }
+          if ($prev) { Write-Host "rollback target: $prev" }
+          else { Write-Host 'no rollback target yet - a failure will leave the box as-is' }
           "sha=$prev" >> $env:GITHUB_OUTPUT
 
       - name: Deploy
@@ -135,6 +157,16 @@ jobs:
             exit 1
           }
           Write-Host "staging is live at $base"
+
+      # Only reached when the health checks above passed, so this commit is
+      # known-good by the only definition that matters. Lives in state/, which
+      # is gitignored and survives checkout because clean is false.
+      - name: Record this commit as known-good
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force -Path 'state' | Out-Null
+          '${{ github.sha }}' | Set-Content 'state\deployed-sha' -NoNewline
+          Write-Host 'recorded ${{ github.sha }} as the rollback target'
 
       # Best-effort: get the box back to the last known-good commit rather
       # than leaving it down. Deliberately does not re-run the health gate -
