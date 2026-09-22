@@ -1,23 +1,32 @@
-"""Application settings, read from environment / .env.
+"""Application settings.
 
-Per-machine values live here rather than in code because the laptop (8 GiB)
-and the desktop (12 GiB) differ on what they can hold resident. Copy
-.env.example to .env and edit.
+Defaults in code, with one deliberate exception: DATA_DIR and STATE_DIR are
+read from the environment, because the staging deploy needs them. The Actions
+runner checks out into its own workspace, so a repo-relative data/ there
+would quietly build a PARALLEL installation - its own empty data/models, its
+own logged-out state/tidal, its own job database. setup/deploy.ps1 sets both
+to fixed paths outside the source tree to prevent that; see the comment at
+the top of its param block. Every field below is in fact env-overridable,
+since that is how pydantic-settings works, but those two are the only ones
+anything actually sets.
 
-Model configuration - which models to preload, the default, output format and
-segment size - is NOT here: it lives in state/model_settings.json (see
-model_settings.py) so the model settings page in the GUI can rewrite it at
-runtime. .env is still the right place for the rest, which is set once at
-deploy time and is not something a page should be able to change.
+There is no .env file and no support for one. The per-machine value that
+used to justify it was segment_size - the laptop (8 GiB) and the desktop
+(12 GiB) differ on what they can hold resident - and that now lives per model
+in state/model_params.json, where the model settings page can edit it at
+runtime. See model_settings.py.
+
+Nor is there a default model or output format here. Both used to be
+fallbacks for a submission that named neither, which only ever hid a bug:
+the page always sends both, so a request without them is a caller that is
+wrong, and /api/jobs now rejects it instead of quietly picking something.
 """
 from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
 from pydantic import field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
-
-from . import model_settings as _model_settings
+from pydantic_settings import BaseSettings
 
 #: The repo root: src/app/config.py -> src/app -> src -> here. data/ and
 #: state/ live beside src/, not inside it.
@@ -30,14 +39,24 @@ _ROOT = Path(__file__).resolve().parents[2]
 LOG_FORMAT = "%(asctime)s %(levelname)-7s %(name)s: %(message)s"
 LOG_DATEFMT = "%H:%M:%S"
 
+#: Preloaded at startup and held resident, in this order - the first is what
+#: the page offers first. No lazy loading: if these do not fit in VRAM
+#: together, startup fails loudly rather than degrading.
+#:
+#: A constant rather than a setting, and the ONLY list of its kind: the
+#: worker loads exactly this (see vocal_remove_worker/process.py) and
+#: setup/fetch_models.py pre-downloads exactly this, so the models on disk
+#: and the models loaded cannot drift apart. Deriving it from data/models
+#: instead would not work - audio-separator writes its own files in there,
+#: including a .yaml CONFIG beside the BS-Roformer .ckpt that dispatches as
+#: an MDXC MODEL and would fail the load.
+PRELOAD_MODELS = [
+    "model_bs_roformer_ep_317_sdr_12.9755.ckpt",
+    "UVR-MDX-NET-Voc_FT.onnx",
+]
+
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(
-        env_file=_ROOT / ".env",
-        env_file_encoding="utf-8",
-        extra="ignore",
-    )
-
     # ---------------------------------------------------------------- paths
     data_dir: Path = _ROOT / "data"
     state_dir: Path = _ROOT / "state"
@@ -80,18 +99,6 @@ class Settings(BaseSettings):
     @property
     def models_dir(self) -> Path:
         return self.data_dir / "models"
-
-    @property
-    def models(self) -> _model_settings.ModelSettings:
-        """Which models to preload, the default, format and segment size.
-
-        Re-read from state/model_settings.json on every access rather than
-        cached on self: this Settings instance is a long-lived singleton (see
-        get_settings()) and is also handed to the worker's child process at
-        spawn time, so a property is what lets a save from the settings page
-        reach both without either holding a stale copy.
-        """
-        return _model_settings.load(self.state_dir)
 
     @property
     def caching_enabled(self) -> bool:

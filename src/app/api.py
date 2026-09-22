@@ -8,7 +8,7 @@ import json
 import logging
 import sqlite3
 from pathlib import Path
-from typing import Iterator, List, Optional
+from typing import Any, Dict, Iterator, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import FileResponse
@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 import tidal_download as td
+from vocal_remove.errors import InvalidConfig
 
 from . import db, jobs as jobs_repo, model_settings as model_settings_repo
 from .config import Settings
@@ -78,16 +79,17 @@ def get_conn(request: Request) -> Iterator[sqlite3.Connection]:
 
 
 class SubmitRequest(BaseModel):
+    """All three are required.
+
+    Neither model nor output_format has a server-side default: the page has
+    a control for each and always sends both, so a submission missing one is
+    a broken caller, and a 422 says that where a silent fallback would have
+    run the wrong job and looked fine.
+    """
+
     url: str = Field(..., description="Tidal track URL, or a bare track id")
-    model: Optional[str] = None
-    output_format: Optional[str] = None
-
-
-class ModelSettingsRequest(BaseModel):
-    preload_models: List[str]
-    default_model: str
-    output_format: str
-    segment_size: Optional[int] = None
+    model: str = Field(..., description="Model filename, as /api/models lists")
+    output_format: str = Field(..., description="FLAC, WAV or MP3")
 
 
 # ------------------------------------------------------------------- health
@@ -120,10 +122,6 @@ def health(worker: Worker = Depends(get_worker),
             "permanent": settings.cache_is_permanent,
             "ttl_seconds": settings.cache_ttl_seconds,
         },
-        "defaults": {
-            "model": settings.models.default_model,
-            "output_format": settings.models.output_format,
-        },
     }
 
 
@@ -132,39 +130,42 @@ def list_models(worker: Worker = Depends(get_worker)):
     return {"models": worker.status()["models"]}
 
 
-# ------------------------------------------------------------ model settings
+# ------------------------------------------------------------- model params
 
 
-@router.get("/settings/models")
-def get_model_settings(settings: Settings = Depends(get_settings_dep)):
-    return settings.models.to_dict()
+@router.get("/models/{model_name}/params")
+def get_model_params(model_name: str,
+                     settings: Settings = Depends(get_settings_dep)):
+    """One model's architecture params - what the model settings page edits.
 
-
-@router.put("/settings/models")
-def update_model_settings(body: ModelSettingsRequest,
-                          settings: Settings = Depends(get_settings_dep)):
-    """Save the model settings page's form to state/model_settings.json.
-
-    Only the default model and output format apply immediately - the worker
-    reads preload_models and segment_size once, at startup, so those two take
-    effect on the next server restart. Nothing here restarts it: doing that
-    automatically would kill whatever job is running mid-separation, which is
-    a bigger side effect than a settings save should have.
+    Any model name is accepted, not just a currently loaded one, so a failed
+    load can still be inspected and fixed here; the page itself only offers
+    the ones /api/models lists.
     """
-    new = model_settings_repo.ModelSettings(
-        preload_models=body.preload_models,
-        default_model=body.default_model,
-        output_format=body.output_format.upper(),
-        segment_size=body.segment_size,
-    )
+    params = model_settings_repo.load_params(settings.state_dir, model_name)
+    return params.to_dict()
+
+
+@router.put("/models/{model_name}/params")
+def update_model_params(model_name: str, body: Dict[str, Any],
+                        settings: Settings = Depends(get_settings_dep)):
+    """Save one model's architecture params to state/model_params.json.
+
+    Which of these apply immediately depends on the field: the worker reads
+    load-time params (segment_size, window_size, ...) once, at startup, so
+    those take effect on the next server restart, while per-job params
+    (overlap, batch_size on MDXC/MDX) apply to this model's next job. Nothing
+    here restarts the worker: doing that automatically would kill whatever
+    job is running mid-separation, which is a bigger side effect than a
+    settings save should have.
+    """
     try:
-        model_settings_repo.save(settings.state_dir, new)
-    except model_settings_repo.InvalidModelSettings as exc:
+        params = model_settings_repo.save_params(settings.state_dir, model_name, body)
+    except (TypeError, InvalidConfig, model_settings_repo.UnknownModelParam) as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc))
-    logger.info("model settings updated: preload=%s default=%s format=%s "
-               "segment_size=%s", new.preload_models, new.default_model,
-               new.output_format, new.segment_size)
-    return new.to_dict()
+
+    logger.info("params updated for %s: %s", model_name, params.values)
+    return params.to_dict()
 
 
 # -------------------------------------------------------------------- login
@@ -222,8 +223,8 @@ def submit_job(body: SubmitRequest, response: Response,
     submission runs a full download and separation only to be rejected by the
     unique cache index at the very end.
     """
-    model = body.model or settings.models.default_model
-    output_format = (body.output_format or settings.models.output_format).upper()
+    model = body.model
+    output_format = body.output_format.upper()
 
     if not worker.running:
         # The worker restarts itself, so this is usually a few seconds rather

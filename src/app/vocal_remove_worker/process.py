@@ -31,8 +31,8 @@ from typing import Dict, List, Mapping, Tuple
 import tidal_download as td
 import vocal_remove as vr
 
-from .. import db, jobs as jobs_repo, pipeline
-from ..config import LOG_DATEFMT, LOG_FORMAT, Settings
+from .. import db, jobs as jobs_repo, model_settings as model_settings_repo, pipeline
+from ..config import LOG_DATEFMT, LOG_FORMAT, PRELOAD_MODELS, Settings
 # Importing supervise here is not a cycle: it reaches this module only from
 # inside the function it hands to multiprocessing, never at import time.
 from .supervise import FATAL, READY, STOP
@@ -101,15 +101,15 @@ def _load_models(settings: Settings) -> Tuple[Dict[str, vr.LoadedModel],
     around - hence a refusal rather than a degraded worker.
     """
     settings.ensure_dirs()
-    model_settings = settings.models
 
     configs = []
-    for name in model_settings.preload_models:
+    for name in PRELOAD_MODELS:
         model_cls, _ = vr.config_classes_for(name)
+        params = model_settings_repo.load_params(settings.state_dir, name)
         configs.append(model_cls(
             name=name,
             model_dir=settings.models_dir,
-            segment_size=model_settings.segment_size,
+            **params.load_time_kwargs(),
         ))
 
     loaded = vr.init_models(configs)
@@ -124,7 +124,7 @@ def _load_models(settings: Settings) -> Tuple[Dict[str, vr.LoadedModel],
     duplicates = [m.config.name for m in loaded
                   if m.status is vr.LoadStatus.DUPLICATE]
     if duplicates:
-        logger.warning("ignoring duplicate entries in preload_models: %s",
+        logger.warning("ignoring duplicate entries in PRELOAD_MODELS: %s",
                        ", ".join(duplicates))
 
     cpu_only = [n for n, m in models.items() if not m.on_gpu]

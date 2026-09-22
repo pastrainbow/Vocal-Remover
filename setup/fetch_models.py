@@ -26,28 +26,28 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from vocal_remove import (DEFAULT_MDX_MODEL, DEFAULT_MDXC_MODEL,  # noqa: E402
-                          MDXCModelConfig)
+from vocal_remove import MDXCModelConfig  # noqa: E402
 
 
 def _wanted() -> list:
-    """The models the server will actually preload.
+    """The models the server will preload - the same list it loads.
 
-    Falls back to the library defaults if settings will not import, so this
-    stays usable on a half-built environment - which is exactly when someone
-    runs it.
+    app.config.PRELOAD_MODELS is the only list of its kind, and there is
+    deliberately no fallback copy here: a second list is one that can
+    disagree with what the worker actually loads, so this would prefetch one
+    set while the server loaded another. If it will not import - a half-built
+    environment, which is exactly when someone runs this - fetching nothing
+    is the honest answer, and the models still download on first use.
     """
     try:
-        sys.path.insert(0, str(ROOT / "src"))
-        from app.config import get_settings
+        from app.config import PRELOAD_MODELS
 
-        names = list(get_settings().models.preload_models)
-        if names:
-            return names
+        return list(PRELOAD_MODELS)
     except Exception as exc:  # noqa: BLE001 - a helper, never a blocker
-        print(f"  [warn] could not read preload_models ({type(exc).__name__}: "
-              f"{exc}); falling back to defaults")
-    return [DEFAULT_MDXC_MODEL, DEFAULT_MDX_MODEL]
+        print(f"  [warn] could not read PRELOAD_MODELS ({type(exc).__name__}: "
+              f"{exc}); skipping the prefetch - the models will download on "
+              f"first use instead")
+        return []
 
 
 def _snapshot(model_dir: Path) -> set:

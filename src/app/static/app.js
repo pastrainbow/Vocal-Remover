@@ -191,16 +191,17 @@ function setPill(text, kind) {
   pill.className = `pill pill--${kind}`;
 }
 
-async function loadModels(health) {
+async function loadModels() {
   const select = el("model");
   const { models } = await (await fetch("/api/models")).json();
   const usable = models.filter((m) => m.status === "loaded");
   select.innerHTML = "";
+  // Preload order is the preference order, and the first <option> is
+  // selected by default - so the server needs no "default model" setting.
   for (const m of usable) {
     const opt = document.createElement("option");
     opt.value = m.name;
     opt.textContent = m.name;
-    if (health && m.name === health.defaults.model) opt.selected = true;
     select.append(opt);
   }
   if (!usable.length) {
@@ -395,8 +396,8 @@ function close(jobId) {
 // -------------------------------------------------------------------- boot
 
 (async function boot() {
-  const health = await loadHealth();
-  await loadModels(health);
+  await loadHealth();
+  await loadModels();
   await loadRecent();
   // Cheap poll: catches a session that expires while the page is open, or a
   // login done elsewhere (another tab, or the CLI).

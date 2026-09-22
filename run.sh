@@ -240,8 +240,9 @@ say "caching UVR models"
 
 # Run from src/ so the three packages import without any PYTHONPATH, an
 # editable install, or a .pth file in the venv. Everything the app reads or
-# writes - data/, state/, .env - is resolved from __file__ against the repo
-# root, so the working directory does not matter to it.
+# writes - data/ and state/ - is resolved from __file__ against the repo
+# root, so the working directory does not matter to it. DATA_DIR and
+# STATE_DIR in the environment override both; the deploy sets them.
 say "starting the server (ctrl-c to stop)"
 cd "$ROOT/src"
 exec "$PY" -m app.main

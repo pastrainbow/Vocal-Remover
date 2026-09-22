@@ -2,38 +2,24 @@
 
 const el = (id) => document.getElementById(id);
 
-const parseModelLines = (text) =>
-  text.split("\n").map((s) => s.trim()).filter(Boolean);
+let currentModel = null;
+let currentSpec = null;  // the last GET/PUT response: {model, arch, load_time_fields, per_job_fields, kinds, values}
 
-function rebuildDefaultModelOptions(names, selected) {
-  const select = el("default-model");
-  select.innerHTML = "";
-  if (!names.length) {
-    select.innerHTML = '<option value="">add a model above</option>';
-    return;
-  }
-  for (const name of names) {
-    const opt = document.createElement("option");
-    opt.value = name;
-    opt.textContent = name;
-    if (name === selected) opt.selected = true;
-    select.append(opt);
-  }
-  // The previous default may have just been deleted from the textarea; fall
-  // back to whatever is first rather than silently submitting nothing.
-  if (!names.includes(selected)) select.value = names[0];
+function node(tag, className, children) {
+  const element = document.createElement(tag);
+  if (className) element.className = className;
+  if (typeof children === "string") element.textContent = children;
+  else if (Array.isArray(children)) element.append(...children);
+  return element;
 }
 
-async function loadCurrent() {
-  const settings = await (await fetch("/api/settings/models")).json();
-  el("preload").value = settings.preload_models.join("\n");
-  rebuildDefaultModelOptions(settings.preload_models, settings.default_model);
-  el("format").value = settings.output_format;
-  el("segment-size").value = settings.segment_size ?? "";
-}
+const prettify = (name) =>
+  name.replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase());
 
-async function loadStatus() {
-  const list = el("status-list");
+// --------------------------------------------------------------- model list
+
+async function loadModelList() {
+  const list = el("model-list");
   let models;
   try {
     ({ models } = await (await fetch("/api/models")).json());
@@ -50,24 +36,103 @@ async function loadStatus() {
     const bits = [m.name, m.status];
     if (m.device) bits.push(m.device);
     if (m.error) bits.push(m.error);
-    list.append(node("li", "", bits.join(" — ")));
+
+    const item = node("li", "status-list__item", bits.join(" — "));
+    item.tabIndex = 0;
+    item.addEventListener("click", () => selectModel(m.name));
+    item.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        selectModel(m.name);
+      }
+    });
+    if (m.name === currentModel) item.classList.add("status-list__item--selected");
+    list.append(item);
   }
 }
 
-function node(tag, className, text) {
-  const element = document.createElement(tag);
-  if (className) element.className = className;
-  element.textContent = text;
-  return element;
+// ----------------------------------------------------------------- params
+
+async function selectModel(name) {
+  currentModel = name;
+  await loadModelList();  // just to refresh the --selected highlight
+
+  el("form-error").hidden = true;
+  el("form-ok").hidden = true;
+
+  const response = await fetch(`/api/models/${encodeURIComponent(name)}/params`);
+  const body = await response.json();
+  if (!response.ok) {
+    el("form-error").textContent = body.detail || `Could not load params (${response.status})`;
+    el("form-error").hidden = false;
+    el("params-form").hidden = true;
+    return;
+  }
+
+  currentSpec = body;
+  renderForm(body);
 }
 
-el("preload").addEventListener("input", () => {
-  rebuildDefaultModelOptions(parseModelLines(el("preload").value),
-                             el("default-model").value);
-});
+/** One <label class="field"> per param, built entirely from what the API
+ *  says about this model - no per-architecture table in this file. `kind`
+ *  ("bool" | "text" | "number") picks the input type; membership in
+ *  load_time_fields vs per_job_fields picks the "(restart)" marker. */
+function renderForm(spec) {
+  el("params-heading").textContent = `${spec.model} (${spec.arch})`;
 
-el("settings-form").addEventListener("submit", async (event) => {
+  const fields = el("params-fields");
+  fields.innerHTML = "";
+  const restartFields = new Set(spec.load_time_fields);
+
+  for (const name of [...spec.load_time_fields, ...spec.per_job_fields]) {
+    const kind = spec.kinds[name];
+    const value = spec.values[name];
+
+    const input = document.createElement("input");
+    input.id = `field-${name}`;
+    input.name = name;
+
+    if (kind === "bool") {
+      input.type = "checkbox";
+      input.checked = Boolean(value);
+    } else if (kind === "number") {
+      input.type = "number";
+      input.step = "any";
+      input.placeholder = "model default";
+      input.value = value === null || value === undefined ? "" : value;
+    } else {
+      input.type = "text";
+      input.value = value ?? "";
+    }
+
+    const labelText = prettify(name) + (restartFields.has(name) ? " (restart)" : "");
+    fields.append(node("label", "field", [node("span", "", labelText), input]));
+  }
+
+  el("params-form").hidden = false;
+}
+
+function readForm(spec) {
+  const body = {};
+  for (const name of [...spec.load_time_fields, ...spec.per_job_fields]) {
+    const input = el(`field-${name}`);
+    const kind = spec.kinds[name];
+    if (kind === "bool") {
+      body[name] = input.checked;
+    } else if (kind === "number") {
+      const raw = input.value.trim();
+      body[name] = raw === "" ? null : Number(raw);
+    } else {
+      body[name] = input.value;
+    }
+  }
+  return body;
+}
+
+el("params-form").addEventListener("submit", async (event) => {
   event.preventDefault();
+  if (!currentModel || !currentSpec) return;
+
   const button = el("save");
   const errorBox = el("form-error");
   const okBox = el("form-ok");
@@ -75,20 +140,15 @@ el("settings-form").addEventListener("submit", async (event) => {
   okBox.hidden = true;
   button.disabled = true;
 
-  const segmentRaw = el("segment-size").value.trim();
-  const body = {
-    preload_models: parseModelLines(el("preload").value),
-    default_model: el("default-model").value,
-    output_format: el("format").value,
-    segment_size: segmentRaw ? Number(segmentRaw) : null,
-  };
-
   try {
-    const response = await fetch("/api/settings/models", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
+    const response = await fetch(
+      `/api/models/${encodeURIComponent(currentModel)}/params`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(readForm(currentSpec)),
+      },
+    );
     const result = await response.json();
 
     if (!response.ok) {
@@ -97,10 +157,10 @@ el("settings-form").addEventListener("submit", async (event) => {
       return;
     }
 
-    okBox.textContent = "Saved. Restart the server to apply changes to " +
-      "preloaded models or segment size.";
+    okBox.textContent = "Saved.";
     okBox.hidden = false;
-    rebuildDefaultModelOptions(result.preload_models, result.default_model);
+    currentSpec = result;
+    renderForm(result);
   } catch (err) {
     errorBox.textContent = String(err);
     errorBox.hidden = false;
@@ -110,6 +170,5 @@ el("settings-form").addEventListener("submit", async (event) => {
 });
 
 (async function boot() {
-  await loadCurrent();
-  await loadStatus();
+  await loadModelList();
 })();

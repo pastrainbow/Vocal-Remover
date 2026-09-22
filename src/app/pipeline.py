@@ -16,7 +16,7 @@ import tidal_download as td
 import vocal_remove as vr
 
 from .jobs import Job, Stage
-from . import jobs as jobs_repo
+from . import jobs as jobs_repo, model_settings as model_settings_repo
 
 logger = logging.getLogger("app.pipeline")
 
@@ -40,7 +40,7 @@ def run_job(conn, job_id: str, client: td.TidalClient,
 
     try:
         download = _download(conn, job, client, staging)
-        stems = _separate(conn, job, download, models, out_dir)
+        stems = _separate(conn, job, download, models, out_dir, settings)
         # Inside the try on purpose: completing is where the unique cache
         # index can fire, and that must be explained rather than escaping as
         # an unhandled error.
@@ -105,7 +105,7 @@ def _download(conn, job: Job, client: td.TidalClient,
 
 def _separate(conn, job: Job, download: td.DownloadResult,
               models: Mapping[str, vr.LoadedModel],
-              out_dir: Path) -> vr.SeparateResult:
+              out_dir: Path, settings) -> vr.SeparateResult:
     model = models.get(job.model)
     if model is None:
         raise vr.ModelLoadError(
@@ -114,7 +114,9 @@ def _separate(conn, job: Job, download: td.DownloadResult,
     jobs_repo.advance(conn, job.id, Stage.SEPARATING)
 
     _, sep_cls = vr.config_classes_for(job.model)
-    sep_config = sep_cls(output_dir=out_dir, output_format=job.output_format)
+    params = model_settings_repo.load_params(settings.state_dir, job.model)
+    sep_config = sep_cls(output_dir=out_dir, output_format=job.output_format,
+                         **params.per_job_kwargs())
     logger.info("job %s separating with %s", job.id, job.model)
 
     # separate() returns a handle immediately; the work runs on its own daemon

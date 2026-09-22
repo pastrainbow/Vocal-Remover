@@ -27,7 +27,8 @@
 #>
 [CmdletBinding()]
 param(
-    # Must agree with PORT in .env - this is only where we look for /api/health.
+    # Must agree with Settings.port - this is only where we look for
+    # /api/health.
     [int]$Port = 8000,
     # Half an hour, because this window now covers all of run.sh: a cold
     # lockfile sync pulls ~3 GB of CUDA wheels, the model prefetch another

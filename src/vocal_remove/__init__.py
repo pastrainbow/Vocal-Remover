@@ -21,7 +21,19 @@ MDX-Net, VR for .pth, Demucs for .yaml.
 
 Loading costs 1.6-3.3s warm and separation 20-126s depending on the model, so
 hold the LoadedModel list for the lifetime of the worker.
+
+LoadedModel, init_models, separate, Separation and SeparateResult come from
+.separator, which is NOT imported at module load time - see __getattr__
+below. .separator imports audio_separator and torch, multiple seconds and a
+large chunk of memory that a caller wanting only .config's plain dataclasses
+(app.model_settings, notably - it reads the per-architecture field names and
+defaults for the model settings page, in the same process that serves HTTP)
+should never pay for. `import vocal_remove.config` or `from vocal_remove
+import MDXCModelConfig` therefore stays cheap; only touching one of the six
+names below pulls .separator in, on first use.
 """
+from importlib import import_module
+
 from .config import (
     DEFAULT_DEMUCS_MODEL,
     DEFAULT_MDX_MODEL,
@@ -49,16 +61,33 @@ from .errors import (
     SeparationError,
     VocalRemoveError,
 )
-from .separator import (
-    LoadedModel,
-    LoadStatus,
-    Separation,
-    SeparateResult,
-    init_models,
-    separate,
-)
-
 from . import errors  # noqa: F401  so `from vocal_remove import *` binds it
+
+#: name -> the submodule that defines it, for __getattr__ below.
+_LAZY = {
+    "LoadedModel": "separator",
+    "LoadStatus": "separator",
+    "Separation": "separator",
+    "SeparateResult": "separator",
+    "init_models": "separator",
+    "separate": "separator",
+}
+
+
+def __getattr__(name):
+    """PEP 562: import .separator on first use of one of its names.
+
+    Regular attribute access never reaches here - it only runs on a miss, so
+    every access after the first is a normal (fast) module attribute lookup
+    via the globals() write below.
+    """
+    module_name = _LAZY.get(name)
+    if module_name is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    module = import_module(f".{module_name}", __name__)
+    value = getattr(module, name)
+    globals()[name] = value
+    return value
 
 __all__ = [
     # api

@@ -15,47 +15,21 @@
 
 <main>
   <p class="hint">
-    Saved to <code>state/model_settings.json</code>. The default model and
-    output format apply to the next job submitted. Preloaded models and
-    segment size are read once at startup, so changing either needs a server
-    restart before it takes effect.
+    Pick a loaded model to adjust its inference parameters. Fields marked
+    <em>restart</em> are read once at startup, so a change needs the server
+    restarted before it takes effect; the rest apply to that model's next job.
   </p>
 
-  <form id="settings-form" autocomplete="off">
-    <label class="field field--grow">
-      <span>Preloaded models (one filename per line)</span>
-      <textarea id="preload" rows="4" required
-                placeholder="model_bs_roformer_ep_317_sdr_12.9755.ckpt"></textarea>
-    </label>
+  <ul id="model-list" class="status-list"></ul>
 
-    <label class="field">
-      <span>Default model</span>
-      <select id="default-model" required></select>
-    </label>
-
-    <label class="field">
-      <span>Output format</span>
-      <select id="format">
-        <option value="FLAC">FLAC</option>
-        <option value="WAV">WAV</option>
-        <option value="MP3">MP3</option>
-      </select>
-    </label>
-
-    <label class="field">
-      <span>Segment size</span>
-      <input id="segment-size" type="number" min="1" step="1"
-             placeholder="model default">
-    </label>
-
+  <form id="params-form" hidden autocomplete="off">
+    <h2 id="params-heading"></h2>
+    <div id="params-fields" class="field-grid"></div>
     <button id="save" type="submit">Save</button>
   </form>
 
   <div id="form-error" class="banner banner--error" hidden></div>
   <div id="form-ok" class="banner banner--ok" hidden></div>
-
-  <h2>Currently loaded</h2>
-  <ul id="status-list" class="status-list"></ul>
 </main>
 
 <script src="/settings.js"></script>
