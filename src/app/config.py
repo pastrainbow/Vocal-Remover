@@ -11,7 +11,9 @@ from typing import List, Optional
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-_ROOT = Path(__file__).resolve().parents[1]
+#: The repo root: src/app/config.py -> src/app -> src -> here. data/ and
+#: state/ live beside src/, not inside it.
+_ROOT = Path(__file__).resolve().parents[2]
 
 
 class Settings(BaseSettings):

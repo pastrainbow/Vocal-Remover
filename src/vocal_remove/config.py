@@ -31,7 +31,9 @@ from typing import Any, Dict, Optional
 
 from . import errors
 
-_ROOT = Path(__file__).resolve().parents[1]
+#: The repo root: src/vocal_remove/config.py -> src/vocal_remove -> src ->
+#: here. Models and output land in data/, which sits beside src/.
+_ROOT = Path(__file__).resolve().parents[2]
 
 #: BS-Roformer (MDXC). Best quality measured: 1.8x realtime on an RTX 4060.
 DEFAULT_MDXC_MODEL = "model_bs_roformer_ep_317_sdr_12.9755.ckpt"

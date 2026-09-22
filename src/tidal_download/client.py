@@ -81,7 +81,9 @@ class TidalClient:
 
     def __init__(self, config_dir: Union[str, Path, None] = None):
         if config_dir is None:
-            config_dir = Path(__file__).resolve().parents[1] / "state" / "tidal"
+            # The repo root is two levels up from src/tidal_download/, and
+            # state/ sits beside src/ rather than inside it.
+            config_dir = Path(__file__).resolve().parents[2] / "state" / "tidal"
         self.config_dir = Path(config_dir)
         self.config_dir.mkdir(parents=True, exist_ok=True)
         self.session_file = self.config_dir / "session.json"

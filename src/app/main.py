@@ -1,7 +1,12 @@
 """FastAPI application.
 
-    venv\\Scripts\\python.exe -m app.main
-    venv\\Scripts\\uvicorn.exe app.main:app --reload
+    ./run.sh                                      installs what is missing
+
+or, if you would rather drive it yourself, from src/ so that the packages
+beside this one are importable:
+
+    ../venv/Scripts/python.exe -m app.main
+    ../venv/Scripts/uvicorn.exe app.main:app --reload
 
 Models load during startup, so the first request waits for a healthy worker
 rather than racing it. A model that cannot load aborts startup outright -
