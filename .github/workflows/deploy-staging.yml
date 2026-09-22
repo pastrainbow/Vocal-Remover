@@ -101,35 +101,12 @@ jobs:
           # clean: false the fetch is incremental after the first run.
           fetch-depth: 0
 
-      - name: Record rollback target
-        id: previous
-        shell: powershell
-        run: |
-          # The last commit that reached a healthy health check, recorded by
-          # the step at the end of this job. HEAD~1 was the wrong target: the
-          # parent commit is not necessarily the one running on the box, and
-          # after a failed deploy it is the commit that just failed.
-          $prev = ''
-          if (Test-Path 'state\deployed-sha') {
-            $prev = (Get-Content 'state\deployed-sha' -Raw).Trim()
-          }
-          if (-not $prev) {
-            # Nothing recorded yet - first deploy after adding this, or a
-            # fresh box. --verify --quiet writes nothing to stderr and exits
-            # non-zero if the revision is missing, which is the one form that
-            # is safe here; `git ... 2>$null` under Windows PowerShell wraps
-            # stderr in an ErrorRecord and, with $ErrorActionPreference stop,
-            # fails the step outright. That is what broke this step before.
-            $p = git rev-parse --verify --quiet HEAD~1
-            if ($LASTEXITCODE -eq 0 -and $p) { $prev = $p.Trim() }
-            $global:LASTEXITCODE = 0
-          }
-          if ($prev) { Write-Host "rollback target: $prev" }
-          else { Write-Host 'no rollback target yet - a failure will leave the box as-is' }
-          "sha=$prev" >> $env:GITHUB_OUTPUT
-
       - name: Deploy
         shell: powershell
+        # A hard ceiling. The job-level timeout is 45 minutes, which is the
+        # right budget for a cold CUDA sync but far too long to sit on a
+        # deploy that has stopped making progress.
+        timeout-minutes: 20
         # VR_DATA_DIR / VR_STATE_DIR keep models, stems, the job database and
         # the Tidal token OUTSIDE the runner workspace. Without them the
         # deploy installs into _work\<repo>\<repo>, which is not the tree
@@ -166,30 +143,18 @@ jobs:
           }
           Write-Host "staging is live at $base"
 
-      # Only reached when the health checks above passed, so this commit is
-      # known-good by the only definition that matters. Lives in state/, which
-      # is gitignored and survives checkout because clean is false.
-      - name: Record this commit as known-good
-        shell: powershell
-        run: |
-          New-Item -ItemType Directory -Force -Path 'state' | Out-Null
-          '${{ github.sha }}' | Set-Content 'state\deployed-sha' -NoNewline
-          Write-Host 'recorded ${{ github.sha }} as the rollback target'
-
-      # Best-effort: get the box back to the last known-good commit rather
-      # than leaving it down. Deliberately does not re-run the health gate -
-      # if the rollback is also broken, that needs a human, and a second
-      # failure here would only bury the original error.
-      - name: Roll back on failure
-        if: ${{ failure() && steps.previous.outputs.sha != '' }}
-        shell: powershell
-        env:
-          VR_DATA_DIR: ${{ vars.VR_DATA_DIR }}
-          VR_STATE_DIR: ${{ vars.VR_STATE_DIR }}
-        run: |
-          Write-Host "::warning::deploy failed, rolling back to ${{ steps.previous.outputs.sha }}"
-          git checkout --force ${{ steps.previous.outputs.sha }}
-          ./setup/deploy.ps1
+      # There is deliberately NO automatic rollback step here.
+      #
+      # It was removed after it did more harm than the failure it was meant to
+      # contain: on a failed deploy it checked out an older commit and ran
+      # THAT commit's deploy.ps1 - older, differently-behaved code, chosen by
+      # a heuristic - which wedged the job and could not be cancelled.
+      #
+      # staging-health.yml is the better safety net and already covers the
+      # case: it checks every 15 minutes and runs a full repair with the
+      # CURRENT code whenever staging is down. A failed deploy now leaves a
+      # red run and a box that heals itself, instead of a green-ish run and a
+      # box running an unknown revision.
 
       - name: Summary
         if: always()

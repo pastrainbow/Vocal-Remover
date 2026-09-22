@@ -160,7 +160,10 @@ function Wait-PortFree {
     # port still held by a dying process is the same 10048 by another route.
     $deadline = (Get-Date).AddSeconds(30)
     while ((Get-Date) -lt $deadline) {
-        if ((Get-PortOwners).Count -eq 0) { return }
+        # @() around the call, not just inside it: PowerShell unrolls a
+        # single-element array on return, so one listener comes back as a bare
+        # pid, and .Count on a scalar is an error under Set-StrictMode Latest.
+        if (@(Get-PortOwners).Count -eq 0) { return }
         Start-Sleep -Milliseconds 500
     }
     Die "port $Port is still in use after 30s"
@@ -248,19 +251,32 @@ function Start-App {
     if (-not (Test-Path $python)) { Die "no venv python at $python" }
 
     Say 'starting app'
-    # Redirecting both streams to files is load-bearing, not tidiness: a
-    # process still holding the job's console handles is one the Actions
-    # runner will reap when the step ends, taking the server with it.
-    $proc = Start-Process -FilePath $python `
-        -ArgumentList '-m', 'app.main' `
-        -WorkingDirectory (Join-Path $Root 'src') `
-        -RedirectStandardOutput $stdout `
-        -RedirectStandardError  $stderr `
-        -WindowStyle Hidden -PassThru
+    # Win32_Process.Create, not Start-Process, and this is the whole reason
+    # the job used to hang.
+    #
+    # A long-lived server started as a descendant of an Actions step keeps
+    # that step's stdout/stderr handles open. The runner does not end a step
+    # until those handles close, so a PERFECTLY SUCCESSFUL deploy would hang
+    # forever, and cancelling would not help - the runner is blocked on a
+    # handle, not on a signal. Start-Process -RedirectStandardOutput mostly
+    # avoids that, but only while nothing else in the chain reintroduces
+    # inheritance.
+    #
+    # Win32_Process.Create is not a child of this shell at all: the WMI
+    # service creates it, so there is no handle to inherit and no process
+    # tree for the runner to wait on. Redirection then has to happen inside
+    # the command line, which is what the cmd.exe wrapper is for.
+    $cmdLine = 'cmd.exe /c ""{0}" -m app.main >"{1}" 2>"{2}""' -f $python, $stdout, $stderr
+    $result  = ([wmiclass]'Win32_Process').Create($cmdLine, (Join-Path $Root 'src'))
+    if ($result.ReturnValue -ne 0) {
+        Die "could not start the app: Win32_Process.Create returned $($result.ReturnValue)"
+    }
 
-    $proc.Id | Set-Content $PidFile -NoNewline
-    Say "pid $($proc.Id), logs in state\logs\app-$stamp.*.log"
-    return @{ Proc = $proc; Stdout = $stdout; Stderr = $stderr }
+    Say "launched, logs in $LogDir\app-$stamp.*.log"
+    # The pid is deliberately NOT recorded here: Create returns cmd.exe's pid,
+    # and the python underneath it is what matters. Wait-Healthy records the
+    # real one once the port is bound.
+    return @{ Stdout = $stdout; Stderr = $stderr }
 }
 
 # -------------------------------------------------------------------- verify
@@ -270,14 +286,6 @@ function Wait-Healthy($started) {
     Say "waiting for $Health"
 
     while ((Get-Date) -lt $deadline) {
-        # A dead process will never become healthy. Catching it here turns a
-        # five-minute timeout into an immediate failure with the real error.
-        if ($started.Proc.HasExited) {
-            Write-Host '--- stderr ---' -ForegroundColor Yellow
-            Get-Content $started.Stderr -Tail 40 -ErrorAction SilentlyContinue
-            Die "app exited during startup (code $($started.Proc.ExitCode))"
-        }
-
         try {
             $r = Invoke-RestMethod -Uri $Health -TimeoutSec 5
         }
@@ -299,7 +307,17 @@ function Wait-Healthy($started) {
             Die 'worker is running but not every model loaded'
         }
 
-        Say "healthy - $($r.worker.models.Count) model(s) resident"
+        # Record the real pid now that something is listening. Start-App
+        # cannot: WMI hands back cmd.exe's pid, not python's.
+        $owners = @(Get-PortOwners)
+        if ($owners.Count -gt 0) {
+            $owners[0] | Set-Content $PidFile -NoNewline
+            Say "pid $($owners[0]) recorded"
+        }
+
+        # Same unrolling hazard: a single preloaded model deserialises to one
+        # object rather than a one-element array.
+        Say "healthy - $(@($r.worker.models).Count) model(s) resident"
         $r.worker.models | ForEach-Object {
             Write-Host "    $($_.name)  $($_.device)  $($_.load_seconds)s"
         }
@@ -312,6 +330,11 @@ function Wait-Healthy($started) {
         return
     }
 
+    # No process handle to interrogate any more, so the startup log is the
+    # only account of what went wrong. Dumping it here is what keeps a
+    # timeout diagnosable.
+    Write-Host '--- startup stderr ---' -ForegroundColor Yellow
+    Get-Content $started.Stderr -Tail 40 -ErrorAction SilentlyContinue
     Die "not healthy after ${HealthTimeoutSeconds}s"
 }
 

@@ -71,6 +71,9 @@ jobs:
       - name: Repair
         if: steps.health.outputs.healthy != 'true'
         shell: powershell
+        # Bounded, so a repair that stops making progress cannot hold the
+        # deploy-staging concurrency group and block real deploys behind it.
+        timeout-minutes: 20
         # Must match deploy-staging.yml exactly, or a repair would install a
         # second copy beside the one the deploy maintains.
         env:
