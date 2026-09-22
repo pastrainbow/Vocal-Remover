@@ -1,61 +1,71 @@
 """Configuration for model setup and separation.
 
-Both hierarchies are abstract with one concrete subclass per UVR architecture,
-because audio-separator takes a *different parameter dict* for each
-(mdxc_params, mdx_params, vr_params, demucs_params) and the keys do not
-overlap. A single flat config would have to accept every key and silently drop
-the ones that do not apply to the chosen model.
+Two plain dataclasses, split by when audio-separator reads each value:
 
-The split between ModelConfig and SeparationConfig is dictated by when
-audio-separator reads each value:
+  * load_model() fixes what the model IS until it is reloaded -> ModelConfig.
+  * separate() reads the output settings off the instance per file, so those
+    can change between jobs -> SeparationConfig.
 
-  * load_model() copies its arch dict into the model instance, so anything
-    only read there is fixed until the model is reloaded -> ModelConfig.
-  * demix() reads some attributes off the instance at inference time, so those
-    can be changed per job by mutating it -> SeparationConfig.
+Neither carries architecture parameters, and that is deliberate.
+audio-separator takes a different parameter dict per architecture
+(mdxc_params, mdx_params, vr_params, demucs_params), and this module used to
+mirror all four with a ModelConfig/SeparationConfig subclass each so they
+could be edited per model. Every field in them turned out to be inert, fixed
+by the model export, or a one-directional trade of runtime for seam quality:
 
-Verified by reading audio-separator 0.47.0 and by measurement: overlap and
-batch_size are read inside demix() on both MDXC and MDX. segment_size is read
-in demix() by MDXC but ALSO branched on in MDX's load_model()
-(`self.segment_size == self.dim_t`) and used to derive chunk_size, so it is
-load-time for the API as a whole.
+  * batch_size did nothing on either preloaded model. BS-Roformer skips
+    batching outright ("not utilized due to negligible performance
+    improvements", mdxc_separator.py), and MDX's demix() splits a tensor
+    whose batch dimension is always 1 - the residue of an older code path
+    whose other half, initialize_mix(), is now called from nowhere.
+  * MDX's segment_size has exactly one correct value: load_model() takes the
+    ONNX Runtime path only while it equals the model's own dim_t, and falls
+    back to an onnx2torch conversion ("processing may be slower") otherwise.
+    hop_length is likewise the stride the model was exported with.
+  * MDXC's segment_size defaults to the checkpoint's TRAINED chunk length
+    (BS-Roformer: dim_t 801, ie 441 * 800 = 352800 samples = 8.0s, matching
+    its own audio.chunk_size), so it is the quality optimum rather than a
+    memory-conservative guess. It survived only as a CUDA OOM escape hatch.
+  * overlap and enable_denoise buy marginally smoother seams with runtime,
+    monotonically, so there is no optimum to search for.
 
-VR and Demucs parameters are all treated as load-time: their per-inference
-mutability has not been verified here.
+So this package now passes audio-separator NO architecture parameters and
+lets it use its own defaults, which are identical field for field to the
+dicts this module used to build - compare Separator.__init__. Nothing about
+the separation changed when they went.
+
+If a parameter ever needs tuning again, reach for audio-separator's own
+kwargs at the call site in separator.py rather than rebuilding a settings
+surface here.
 """
 import logging
-from abc import ABC, abstractmethod
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
-
-from . import errors
+from typing import Optional
 
 #: The repo root: src/vocal_remove/config.py -> src/vocal_remove -> src ->
 #: here. Models and output land in data/, which sits beside src/.
 _ROOT = Path(__file__).resolve().parents[2]
 
-#: BS-Roformer (MDXC). Best quality measured: 1.8x realtime on an RTX 4060.
-DEFAULT_MDXC_MODEL = "model_bs_roformer_ep_317_sdr_12.9755.ckpt"
-#: MDX-Net (ONNX). Measured 11.7x realtime - ~6.5x faster, lower quality.
-DEFAULT_MDX_MODEL = "UVR-MDX-NET-Voc_FT.onnx"
-DEFAULT_VR_MODEL = "1_HP-UVR.pth"
-DEFAULT_DEMUCS_MODEL = "htdemucs_ft.yaml"
-
-#: What ModelConfig() used to default to, kept for callers that just want
-#: "the good one" without naming an architecture.
-DEFAULT_MODEL = DEFAULT_MDXC_MODEL
-
-
-# --------------------------------------------------------------------- model
+#: Where models are downloaded to and loaded from, unless a caller says
+#: otherwise. Public because setup/fetch_models.py needs the path without
+#: having a model in hand, and deriving it a second time is how a prefetch
+#: ends up filling a directory the server never reads.
+DEFAULT_MODEL_DIR = _ROOT / "data" / "models"
 
 
 @dataclass(frozen=True)
-class ModelConfig(ABC):
-    """How a separation model is built. Changing any of this needs a reload."""
+class ModelConfig:
+    """How a separation model is built. Changing any of this needs a reload.
 
-    name: str = ""
-    model_dir: Path = field(default_factory=lambda: _ROOT / "data" / "models")
+    `name` has no default on purpose. There is exactly one list of models
+    in this project - app.config.PRELOAD_MODELS - and a default here would
+    be a second, quieter one: a caller that forgot to say which model would
+    silently load whichever this module happened to name.
+    """
+
+    name: str
+    model_dir: Path = field(default_factory=lambda: DEFAULT_MODEL_DIR)
 
     #: Mixed precision. Roughly halves VRAM with no audible cost.
     #: Ignored by ONNX models, which run at their native precision.
@@ -71,159 +81,10 @@ class ModelConfig(ABC):
         """Identity for duplicate detection when loading a batch."""
         return self.name
 
-    @classmethod
-    def own_fields(cls) -> Tuple[str, ...]:
-        """Field names this architecture adds beyond ModelConfig itself.
-
-        The added set is exactly the architecture-specific part - what a
-        caller can meaningfully expose as a per-model setting, as opposed to
-        name/model_dir/use_autocast/log_level, which every architecture has.
-        """
-        base = {f.name for f in fields(ModelConfig)}
-        return tuple(f.name for f in fields(cls) if f.name not in base)
-
-    def read_applied(self, instance) -> Dict[str, Any]:
-        """What `instance` will ACTUALLY use, for this config's own fields.
-
-        The counterpart to arch_params(): that writes settings in, this reads
-        back what they became. They are not the same thing, because a None
-        here means "leave it to the model" and audio-separator resolves that
-        at load time from the model's own data - so this is the only way to
-        find out what a default actually is. Call it on a loaded model's
-        separator.model_instance.
-        """
-        return {name: getattr(instance, name) for name in self.own_fields()}
-
-    @property
-    @abstractmethod
-    def arch_key(self) -> str:
-        """Which Separator(...) keyword this config's params belong to."""
-
-    @abstractmethod
-    def arch_params(self) -> Dict[str, Any]:
-        """Architecture parameter dict, starting from library defaults."""
-
 
 @dataclass(frozen=True)
-class MDXCModelConfig(ModelConfig):
-    """MDXC: BS-Roformer and MDX23C checkpoints (.ckpt / .yaml)."""
-
-    name: str = DEFAULT_MDXC_MODEL
-
-    #: Override only for CUDA OOM. BS-Roformer is length-sensitive, so moving
-    #: off its trained segment length trades separation quality for memory.
-    segment_size: Optional[int] = None
-    pitch_shift: int = 0
-
-    @property
-    def arch_key(self) -> str:
-        return "mdxc_params"
-
-    def arch_params(self) -> Dict[str, Any]:
-        params = {"segment_size": 256, "override_model_segment_size": False,
-                  "batch_size": None, "overlap": None,
-                  "pitch_shift": self.pitch_shift}
-        if self.segment_size is not None:
-            params["segment_size"] = self.segment_size
-            # Without this flag MDXC accepts segment_size then ignores it.
-            params["override_model_segment_size"] = True
-        return params
-
-    def read_applied(self, instance) -> Dict[str, Any]:
-        """As ModelConfig.read_applied, minus one trap.
-
-        instance.segment_size is the value we handed over, which MDXC only
-        uses when override_model_segment_size is set - demix() otherwise
-        reads the model's own inference.dim_t and ignores the attribute
-        entirely. Reporting the attribute would therefore claim 256 for a
-        model actually running at its own segment size.
-
-        overlap and batch_size need no such care: MDXC resolves a None for
-        those in __init__, from the model's inference config and then its
-        own 8 and 1, so by the time anything can read them they are real.
-        """
-        applied = super().read_applied(instance)
-        if not instance.override_model_segment_size:
-            applied["segment_size"] = instance.model_data_cfgdict.inference.dim_t
-        return applied
-
-
-@dataclass(frozen=True)
-class MDXModelConfig(ModelConfig):
-    """MDX-Net: ONNX models (.onnx)."""
-
-    name: str = DEFAULT_MDX_MODEL
-
-    #: Load-time here specifically: MDX's load_model() branches on
-    #: `segment_size == dim_t` and derives chunk_size from it.
-    segment_size: Optional[int] = None
-    hop_length: int = 1024
-    enable_denoise: bool = False
-
-    @property
-    def arch_key(self) -> str:
-        return "mdx_params"
-
-    def arch_params(self) -> Dict[str, Any]:
-        params = {"hop_length": self.hop_length, "segment_size": 256,
-                  "overlap": 0.25, "batch_size": 1,
-                  "enable_denoise": self.enable_denoise}
-        if self.segment_size is not None:
-            params["segment_size"] = self.segment_size
-        return params
-
-
-@dataclass(frozen=True)
-class VRModelConfig(ModelConfig):
-    """VR architecture models (.pth)."""
-
-    name: str = DEFAULT_VR_MODEL
-    window_size: int = 512
-    aggression: int = 5
-    batch_size: int = 1
-    enable_tta: bool = False
-    enable_post_process: bool = False
-    post_process_threshold: float = 0.2
-    high_end_process: bool = False
-
-    @property
-    def arch_key(self) -> str:
-        return "vr_params"
-
-    def arch_params(self) -> Dict[str, Any]:
-        return {"batch_size": self.batch_size, "window_size": self.window_size,
-                "aggression": self.aggression, "enable_tta": self.enable_tta,
-                "enable_post_process": self.enable_post_process,
-                "post_process_threshold": self.post_process_threshold,
-                "high_end_process": self.high_end_process}
-
-
-@dataclass(frozen=True)
-class DemucsModelConfig(ModelConfig):
-    """Demucs models (.yaml). Produce four stems, not two."""
-
-    name: str = DEFAULT_DEMUCS_MODEL
-    segment_size: str = "Default"
-    shifts: int = 2
-    overlap: float = 0.25
-    segments_enabled: bool = True
-
-    @property
-    def arch_key(self) -> str:
-        return "demucs_params"
-
-    def arch_params(self) -> Dict[str, Any]:
-        return {"segment_size": self.segment_size, "shifts": self.shifts,
-                "overlap": self.overlap,
-                "segments_enabled": self.segments_enabled}
-
-
-# ---------------------------------------------------------------- separation
-
-
-@dataclass(frozen=True)
-class SeparationConfig(ABC):
-    """Per-job inference settings. None of this requires a model reload."""
+class SeparationConfig:
+    """Per-job output settings. None of this requires a model reload."""
 
     output_dir: Path = field(default_factory=lambda: _ROOT / "data" / "out")
 
@@ -239,25 +100,6 @@ class SeparationConfig(ABC):
     def __post_init__(self):
         object.__setattr__(self, "output_dir", Path(self.output_dir))
 
-    @classmethod
-    def own_fields(cls) -> Tuple[str, ...]:
-        """Field names this architecture adds beyond SeparationConfig itself.
-
-        As ModelConfig.own_fields, for the per-job half: overlap and
-        batch_size on MDXC and MDX, nothing on VR and Demucs.
-        """
-        base = {f.name for f in fields(SeparationConfig)}
-        return tuple(f.name for f in fields(cls) if f.name not in base)
-
-    def read_applied(self, instance) -> Dict[str, Any]:
-        """What `instance` will actually use, for this config's own fields.
-
-        The counterpart to _apply_arch(), which only writes a field when it
-        is not None - so a None here leaves whatever load_model() resolved,
-        and reading the instance is the only way to learn what that was.
-        """
-        return {name: getattr(instance, name) for name in self.own_fields()}
-
     def apply(self, instance) -> None:
         """Mutate a loaded model instance for this job.
 
@@ -266,130 +108,3 @@ class SeparationConfig(ABC):
         """
         instance.output_dir = str(self.output_dir)
         instance.output_format = self.output_format
-        self._apply_arch(instance)
-
-    @abstractmethod
-    def _apply_arch(self, instance) -> None:
-        """Apply architecture-specific per-job overrides."""
-
-
-@dataclass(frozen=True)
-class MDXCSeparationConfig(SeparationConfig):
-    """Per-job settings for MDXC models.
-
-    NOTE the overlap units differ from MDXSeparationConfig - see below. This
-    is the main reason these are separate classes rather than one config with
-    a shared `overlap` field.
-    """
-
-    #: An integer DIVISOR: demix() computes `step = chunk_size // overlap`, so
-    #: this is how many overlapping windows cover each sample. Higher is
-    #: slower and usually cleaner at seams; measured on BS-Roformer,
-    #: overlap 2 -> 4.9s and overlap 8 -> 6.1s on the same 12s clip, with no
-    #: reload between. Defaults to the model's own value (4-8).
-    overlap: Optional[int] = None
-    batch_size: Optional[int] = None
-
-    def __post_init__(self):
-        super().__post_init__()
-        if self.overlap is not None and self.overlap < 1:
-            raise errors.InvalidConfig(
-                f"MDXC overlap must be an integer >= 1 (it divides the chunk "
-                f"size), got {self.overlap!r}. Note MDX uses a 0-1 fraction "
-                f"instead - the two are not interchangeable."
-            )
-        if self.batch_size is not None and self.batch_size < 1:
-            raise errors.InvalidConfig(
-                f"batch_size must be >= 1, got {self.batch_size!r}")
-
-    def _apply_arch(self, instance) -> None:
-        if self.overlap is not None:
-            instance.overlap = self.overlap
-        if self.batch_size is not None:
-            instance.batch_size = self.batch_size
-
-
-@dataclass(frozen=True)
-class MDXSeparationConfig(SeparationConfig):
-    """Per-job settings for MDX-Net models.
-
-    NOTE the overlap units differ from MDXCSeparationConfig - see below.
-    """
-
-    #: A FRACTION in [0, 1): demix() computes `step = int((1 - overlap) *
-    #: chunk_size)`. An MDXC-style integer here makes step negative and the
-    #: output non-finite, so it is rejected at construction. Library default
-    #: is 0.25.
-    overlap: Optional[float] = None
-    batch_size: Optional[int] = None
-
-    def __post_init__(self):
-        super().__post_init__()
-        if self.overlap is not None and not 0.0 <= self.overlap < 1.0:
-            raise errors.InvalidConfig(
-                f"MDX overlap must be a fraction in [0, 1), got "
-                f"{self.overlap!r}. Note MDXC uses an integer divisor instead "
-                f"- the two are not interchangeable."
-            )
-        if self.batch_size is not None and self.batch_size < 1:
-            raise errors.InvalidConfig(
-                f"batch_size must be >= 1, got {self.batch_size!r}")
-
-    def _apply_arch(self, instance) -> None:
-        if self.overlap is not None:
-            instance.overlap = self.overlap
-        if self.batch_size is not None:
-            instance.batch_size = self.batch_size
-
-
-@dataclass(frozen=True)
-class VRSeparationConfig(SeparationConfig):
-    """Per-job settings for VR models.
-
-    VR's parameters have not been verified as safe to mutate after load, so
-    none are exposed here; set them on VRModelConfig instead.
-    """
-
-    def _apply_arch(self, instance) -> None:
-        return None
-
-
-@dataclass(frozen=True)
-class DemucsSeparationConfig(SeparationConfig):
-    """Per-job settings for Demucs models.
-
-    As with VR, Demucs parameters are treated as load-time only.
-    """
-
-    def _apply_arch(self, instance) -> None:
-        return None
-
-
-# ----------------------------------------------------------------- dispatch
-
-
-def config_classes_for(model_name: str):
-    """(ModelConfig subclass, SeparationConfig subclass) for a model filename.
-
-    audio-separator works the architecture out from the model data itself, but
-    callers still have to pick the matching config subclass so parameters land
-    in the dict that architecture actually reads. Dispatching on the extension
-    is what UVR's own naming supports.
-
-    Note `.yaml` is ambiguous - MDX23C and Demucs both use it - so Demucs is
-    identified by name prefix. An unrecognised extension falls back to MDXC,
-    the default architecture.
-    """
-    name = str(model_name)
-    suffix = Path(name).suffix.lower()
-    stem = Path(name).name.lower()
-
-    if suffix == ".onnx":
-        return MDXModelConfig, MDXSeparationConfig
-    if suffix == ".pth":
-        return VRModelConfig, VRSeparationConfig
-    if suffix == ".yaml" and (stem.startswith("htdemucs")
-                              or stem.startswith("hdemucs")
-                              or stem.startswith("demucs")):
-        return DemucsModelConfig, DemucsSeparationConfig
-    return MDXCModelConfig, MDXCSeparationConfig

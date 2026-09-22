@@ -26,7 +26,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from vocal_remove import MDXCModelConfig  # noqa: E402
+from vocal_remove import DEFAULT_MODEL_DIR  # noqa: E402
 
 
 def _wanted() -> list:
@@ -57,7 +57,7 @@ def _snapshot(model_dir: Path) -> set:
 def _model_dir() -> Path:
     """Where the server will actually look for models.
 
-    MDXCModelConfig's default is derived from vocal_remove/config.py's own
+    DEFAULT_MODEL_DIR is derived from vocal_remove/config.py's own
     location, so it is always <source tree>/data/models. That is wrong
     wherever the source tree is not the installation - notably under a CI
     runner, which checks out into its own workspace and would otherwise
@@ -71,7 +71,7 @@ def _model_dir() -> Path:
     except Exception as exc:  # noqa: BLE001 - a helper, never a blocker
         print(f"  [warn] could not read models_dir ({type(exc).__name__}: "
               f"{exc}); falling back to the source-tree default")
-    return MDXCModelConfig().model_dir
+    return DEFAULT_MODEL_DIR
 
 
 def main() -> int:

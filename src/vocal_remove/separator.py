@@ -2,9 +2,10 @@
 
 Two public functions:
 
-    models = init_models([MDXCModelConfig(), MDXModelConfig()])  # once
+    models = init_models([ModelConfig(name="a.ckpt"),
+                          ModelConfig(name="b.onnx")])            # once
     job = separate("song.flac", models[0],
-                   MDXCSeparationConfig(output_dir="out/job1"))   # returns now
+                   SeparationConfig(output_dir="out/job1"))       # returns now
     job.get_progress()                                            # 0.0 - 1.0
     result = job.result()                                         # blocks
     result.vocals, result.instrumental                            # both Paths
@@ -82,8 +83,8 @@ class LoadedModel:
     error: Optional[str] = None
 
     #: Serialises separations on this model. audio-separator keeps per-job
-    #: settings (output dir, format, overlap) on the one shared model
-    #: instance, so two concurrent separations would read each other's.
+    #: settings (output dir, output format) on the one shared model instance,
+    #: so two concurrent separations would read each other's.
     lock: threading.Lock = field(default_factory=threading.Lock,
                                  repr=False, compare=False)
 
@@ -141,12 +142,14 @@ def _load_one(config: ModelConfig) -> LoadedModel:
     config.model_dir.mkdir(parents=True, exist_ok=True)
     started = time.time()
     try:
+        # No architecture parameter dict is passed: audio-separator's own
+        # per-architecture defaults are what this package wants, field for
+        # field. See config.py.
         separator = Separator(
             log_level=config.log_level,
             model_file_dir=str(config.model_dir),
             output_dir=str(config.model_dir),  # replaced per job in separate()
             use_autocast=config.use_autocast,
-            **{config.arch_key: config.arch_params()},
         )
         separator.load_model(config.name)
     except Exception as exc:
@@ -183,7 +186,7 @@ def separate(
     Returns immediately with a handle on the work, which runs on a background
     thread:
 
-        job = separate("song.flac", model, MDXCSeparationConfig(...))
+        job = separate("song.flac", model, SeparationConfig(...))
         while not job.wait(0.5):
             print("%.0f%%" % (job.get_progress() * 100))
         stems = job.result()          # the failure, if any, surfaces here
@@ -361,8 +364,9 @@ def _separate_blocking(audio_path: Path, model: LoadedModel,
     except torch.cuda.OutOfMemoryError as exc:
         torch.cuda.empty_cache()
         raise errors.OutOfMemory(
-            "CUDA ran out of memory. Lower segment_size on the ModelConfig "
-            "(try 128) or batch_size on the SeparationConfig, then reload."
+            "CUDA ran out of memory. There is no inference parameter left to "
+            "turn down - free VRAM on the device, or keep fewer models "
+            "resident."
         ) from exc
     except errors.Cancelled:
         # Raised by us from inside the chunk loop, so it is not a failure to

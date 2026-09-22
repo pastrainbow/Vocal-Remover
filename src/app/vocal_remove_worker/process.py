@@ -31,7 +31,7 @@ from typing import Dict, List, Mapping, Tuple
 import tidal_download as td
 import vocal_remove as vr
 
-from .. import db, jobs as jobs_repo, model_settings as model_settings_repo, pipeline
+from .. import db, jobs as jobs_repo, pipeline
 from ..config import LOG_DATEFMT, LOG_FORMAT, PRELOAD_MODELS, Settings
 # Importing supervise here is not a cycle: it reaches this module only from
 # inside the function it hands to multiprocessing, never at import time.
@@ -102,15 +102,8 @@ def _load_models(settings: Settings) -> Tuple[Dict[str, vr.LoadedModel],
     """
     settings.ensure_dirs()
 
-    configs = []
-    for name in PRELOAD_MODELS:
-        model_cls, _ = vr.config_classes_for(name)
-        params = model_settings_repo.load_params(settings.state_dir, name)
-        configs.append(model_cls(
-            name=name,
-            model_dir=settings.models_dir,
-            **params.load_time_kwargs(),
-        ))
+    configs = [vr.ModelConfig(name=name, model_dir=settings.models_dir)
+               for name in PRELOAD_MODELS]
 
     loaded = vr.init_models(configs)
     models = {m.config.name: m for m in loaded if m.ok}
@@ -143,34 +136,7 @@ def _describe(model: vr.LoadedModel) -> dict:
         "device": model.device if model.ok else None,
         "load_seconds": round(model.load_seconds, 1) if model.ok else None,
         "error": model.error,
-        "applied": _applied(model),
     }
-
-
-def _applied(model: vr.LoadedModel) -> dict:
-    """What this model is actually running with, param by param.
-
-    This process is the only one that can answer that. A param left unset
-    means "whatever the model itself says", and audio-separator resolves
-    that from the checkpoint's own data while loading - so the numbers exist
-    nowhere until a model is live, and only here. The settings page shows
-    them instead of an empty box.
-
-    Never raises: these are read through audio-separator's instance
-    attributes, and a version that moves one is worth a blank field and a
-    warning, not a worker that will not start.
-    """
-    if not model.ok:
-        return {}
-    _, sep_cls = vr.config_classes_for(model.config.name)
-    instance = model.separator.model_instance
-    try:
-        return {**model.config.read_applied(instance),
-                **sep_cls().read_applied(instance)}
-    except Exception:  # noqa: BLE001 - see the docstring
-        logger.warning("could not read the applied params for %s",
-                       model.config.name, exc_info=True)
-        return {}
 
 
 # --------------------------------------------------------------------- loop

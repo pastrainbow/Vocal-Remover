@@ -8,7 +8,7 @@ import json
 import logging
 import sqlite3
 from pathlib import Path
-from typing import Any, Dict, Iterator, Optional
+from typing import Iterator, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import FileResponse
@@ -16,9 +16,8 @@ from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 import tidal_download as td
-from vocal_remove.errors import InvalidConfig
 
-from . import db, jobs as jobs_repo, model_settings as model_settings_repo
+from . import db, jobs as jobs_repo
 from .config import Settings
 from .vocal_remove_worker import Worker
 
@@ -128,66 +127,6 @@ def health(worker: Worker = Depends(get_worker),
 @router.get("/models")
 def list_models(worker: Worker = Depends(get_worker)):
     return {"models": worker.status()["models"]}
-
-
-# ------------------------------------------------------------- model params
-
-
-def _applied_params(worker: Worker, model_name: str) -> Dict[str, Any]:
-    """What this model is currently running with, per the worker's report.
-
-    Empty for a model that is not loaded - nothing has resolved its defaults
-    yet, so there is nothing truthful to show.
-    """
-    for entry in worker.status()["models"]:
-        if entry["name"] == model_name:
-            return entry.get("applied") or {}
-    return {}
-
-
-@router.get("/models/{model_name}/params")
-def get_model_params(model_name: str,
-                     settings: Settings = Depends(get_settings_dep),
-                     worker: Worker = Depends(get_worker)):
-    """One model's architecture params - what the model settings page edits.
-
-    `values` is what is saved, where a None means "leave it to the model";
-    `applied` is what that resolved to on the loaded model. The page shows
-    the second wherever the first is None, so a field is never blank just
-    because nobody has overridden it.
-
-    Any model name is accepted, not just a currently loaded one, so a failed
-    load can still be inspected and fixed here; the page itself only offers
-    the ones /api/models lists.
-    """
-    params = model_settings_repo.load_params(settings.state_dir, model_name)
-    return {**params.to_dict(), "applied": _applied_params(worker, model_name)}
-
-
-@router.put("/models/{model_name}/params")
-def update_model_params(model_name: str, body: Dict[str, Any],
-                        settings: Settings = Depends(get_settings_dep),
-                        worker: Worker = Depends(get_worker)):
-    """Save one model's architecture params to state/model_params.json.
-
-    Which of these apply immediately depends on the field: the worker reads
-    load-time params (segment_size, window_size, ...) once, at startup, so
-    those take effect on the next server restart, while per-job params
-    (overlap, batch_size on MDXC/MDX) apply to this model's next job. Nothing
-    here restarts the worker: doing that automatically would kill whatever
-    job is running mid-separation, which is a bigger side effect than a
-    settings save should have.
-    """
-    try:
-        params = model_settings_repo.save_params(settings.state_dir, model_name, body)
-    except (TypeError, InvalidConfig, model_settings_repo.UnknownModelParam) as exc:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc))
-
-    logger.info("params updated for %s: %s", model_name, params.values)
-    # `applied` is deliberately the pre-save reading: load-time params do not
-    # change until a restart, and per-job ones not until the next job, so
-    # this is still what the model is running with.
-    return {**params.to_dict(), "applied": _applied_params(worker, model_name)}
 
 
 # -------------------------------------------------------------------- login

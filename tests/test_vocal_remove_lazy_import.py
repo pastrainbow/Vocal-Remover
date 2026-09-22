@@ -51,16 +51,8 @@ class TestLazySeparatorImport(unittest.TestCase):
         out = _run(
             "import sys\n"
             "import vocal_remove as vr\n"
-            "vr.MDXCModelConfig\n"
-            "vr.config_classes_for('foo.onnx')\n"
-            "print('torch' in sys.modules)\n"
-        )
-        self.assertEqual(out, "False")
-
-    def test_app_model_settings_does_not_load_torch(self):
-        out = _run(
-            "import sys\n"
-            "from app import model_settings\n"
+            "vr.ModelConfig(name='foo.onnx')\n"
+            "vr.SeparationConfig()\n"
             "print('torch' in sys.modules)\n"
         )
         self.assertEqual(out, "False")

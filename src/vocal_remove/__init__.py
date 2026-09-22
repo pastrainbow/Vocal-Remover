@@ -1,23 +1,22 @@
 """vocal_remove - GPU stem separation over Ultimate Vocal Remover models.
 
-    from vocal_remove import (init_model, separate,
-                              MDXCModelConfig, MDXCSeparationConfig)
+    from vocal_remove import init_models, separate, ModelConfig, SeparationConfig
 
-    models = init_models([MDXCModelConfig()])       # a list in, a list out
+    models = init_models([ModelConfig(name="...ckpt")])  # a list in, list out
     model = models[0]
     if model.ok:
         job = separate("song.flac", model,
-                       MDXCSeparationConfig(output_dir="out/job123"))
+                       SeparationConfig(output_dir="out/job123"))
         while not job.wait(0.5):                    # separate() returns at once
             print(job.get_progress())               # 0.0 -> 1.0
         stems = job.result()  # blocks if still running; raises if it failed
         stems.vocals          # Path to the vocal-only track
         stems.instrumental    # Path to the instrumental-only track
 
-Configs are abstract with one concrete subclass per UVR architecture, because
-audio-separator takes a different parameter dict for each. Pick the subclass
-matching your model: MDXC for .ckpt BS-Roformer/MDX23C, MDX for .onnx
-MDX-Net, VR for .pth, Demucs for .yaml.
+One config class each, for every architecture. audio-separator works out
+which architecture a model file is from its own data, and this package no
+longer overrides any of the per-architecture inference parameters - see
+config.py for what used to be there and why none of it earned its place.
 
 Loading costs 1.6-3.3s warm and separation 20-126s depending on the model, so
 hold the LoadedModel list for the lifetime of the worker.
@@ -26,36 +25,16 @@ LoadedModel, init_models, separate, Separation and SeparateResult come from
 .separator, which is NOT imported at module load time - see __getattr__
 below. .separator imports audio_separator and torch, multiple seconds and a
 large chunk of memory that a caller wanting only .config's plain dataclasses
-(app.model_settings, notably - it reads the per-architecture field names and
-defaults for the model settings page, in the same process that serves HTTP)
 should never pay for. `import vocal_remove.config` or `from vocal_remove
-import MDXCModelConfig` therefore stays cheap; only touching one of the six
+import ModelConfig` therefore stays cheap; only touching one of the six
 names below pulls .separator in, on first use.
 """
 from importlib import import_module
 
-from .config import (
-    DEFAULT_DEMUCS_MODEL,
-    DEFAULT_MDX_MODEL,
-    DEFAULT_MDXC_MODEL,
-    DEFAULT_MODEL,
-    DEFAULT_VR_MODEL,
-    DemucsModelConfig,
-    DemucsSeparationConfig,
-    MDXCModelConfig,
-    MDXCSeparationConfig,
-    MDXModelConfig,
-    MDXSeparationConfig,
-    ModelConfig,
-    SeparationConfig,
-    VRModelConfig,
-    VRSeparationConfig,
-    config_classes_for,
-)
+from .config import DEFAULT_MODEL_DIR, ModelConfig, SeparationConfig
 from .errors import (
     AudioNotFound,
     Cancelled,
-    InvalidConfig,
     ModelLoadError,
     OutOfMemory,
     SeparationError,
@@ -98,28 +77,12 @@ __all__ = [
     "LoadStatus",
     "Separation",
     "SeparateResult",
-    # config - abstract
+    # config
     "ModelConfig",
     "SeparationConfig",
-    "config_classes_for",
-    # config - per architecture
-    "MDXCModelConfig",
-    "MDXCSeparationConfig",
-    "MDXModelConfig",
-    "MDXSeparationConfig",
-    "VRModelConfig",
-    "VRSeparationConfig",
-    "DemucsModelConfig",
-    "DemucsSeparationConfig",
-    # defaults
-    "DEFAULT_MODEL",
-    "DEFAULT_MDXC_MODEL",
-    "DEFAULT_MDX_MODEL",
-    "DEFAULT_VR_MODEL",
-    "DEFAULT_DEMUCS_MODEL",
+    "DEFAULT_MODEL_DIR",
     # errors
     "VocalRemoveError",
-    "InvalidConfig",
     "ModelLoadError",
     "AudioNotFound",
     "SeparationError",

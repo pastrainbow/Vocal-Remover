@@ -12,9 +12,12 @@ anything actually sets.
 
 There is no .env file and no support for one. The per-machine value that
 used to justify it was segment_size - the laptop (8 GiB) and the desktop
-(12 GiB) differ on what they can hold resident - and that now lives per model
-in state/model_params.json, where the model settings page can edit it at
-runtime. See model_settings.py.
+(12 GiB) differ on what they can hold resident - which moved to a per-model
+state file and then went entirely: every inference parameter the models
+expose is either inert, fixed by the model export, or a one-way trade of
+runtime for seam quality, so there was nothing left to configure. See
+vocal_remove/config.py. A machine that genuinely cannot hold PRELOAD_MODELS
+now loads fewer of them rather than shrinking them.
 
 Nor is there a default model or output format here. Both used to be
 fallbacks for a submission that named neither, which only ever hid a bug:
@@ -42,6 +45,12 @@ LOG_DATEFMT = "%H:%M:%S"
 #: Preloaded at startup and held resident, in this order - the first is what
 #: the page offers first. No lazy loading: if these do not fit in VRAM
 #: together, startup fails loudly rather than degrading.
+#:
+#: BS-Roformer is the highest-SDR vocal model audio-separator ships and
+#: measures 1.8x realtime on an RTX 4060; the MDX-Net one measures 11.7x at
+#: lower quality. That ~6.5x spread is the only quality/speed dial this app
+#: has, which is why it is a per-job choice on the page rather than a
+#: setting - see vocal_remove/config.py for what the alternatives were.
 #:
 #: A constant rather than a setting, and the ONLY list of its kind: the
 #: worker loads exactly this (see vocal_remove_worker/process.py) and

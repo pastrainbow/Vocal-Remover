@@ -11,16 +11,6 @@ class VocalRemoveError(Exception):
     """Base for every error raised by this package."""
 
 
-class InvalidConfig(VocalRemoveError):
-    """A config value is out of range for its architecture.
-
-    Raised at config construction rather than during separation, because
-    several of these produce silently corrupt audio rather than an error -
-    e.g. an MDXC-style integer overlap passed to MDX yields a negative step
-    and non-finite samples.
-    """
-
-
 class ModelLoadError(VocalRemoveError):
     """The model could not be downloaded, found, or loaded onto the device."""
 
@@ -44,6 +34,9 @@ class SeparationError(VocalRemoveError):
 class OutOfMemory(SeparationError):
     """The GPU ran out of memory.
 
-    Raised separately from SeparationError because the fix is specific:
-    lower ModelConfig.segment_size, or reduce batch_size.
+    Raised separately from SeparationError because it is a capacity problem
+    rather than a broken job: the same work would succeed on a card with more
+    free VRAM. There is no inference parameter to turn down - see config.py -
+    so the levers are freeing VRAM on the device or keeping fewer models
+    resident.
     """
