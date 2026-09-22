@@ -1,6 +1,7 @@
 """Phase 0a gate: prove CUDA is live and a real separation runs on GPU.
 
-Usage:  python scripts/gate_uvr.py [audio] [--model M] [--segment N] [--no-autocast]
+Usage:  venv/Scripts/python.exe -m smoke_test.gate_uvr [audio] [--model M]
+        [--segment N] [--no-autocast]
 Exits non-zero if the environment is not GPU-capable.
 """
 import argparse, os, sys, threading, time, pathlib

@@ -1,8 +1,12 @@
-"""Health check for the application environment.
+"""Health check for the application environment. A helper, not an entry point.
 
-Operational utility, not a dev script: setup.ps1 runs it after installing, and
-doctor.ps1 runs it on its own. Exits 0 if everything the app needs is working,
-1 otherwise, so it is usable from CI or a pre-flight check.
+    ./run.sh --check
+
+Run by run.sh, inside the venv. Exits 0 if everything the app needs is
+working and 1 otherwise, so it also serves as a pre-flight check in CI.
+
+Operational, not a dev script: it answers "which layer is broken" when
+something stops working, rather than making you bisect it by hand.
 
 It deliberately checks behaviour rather than presence - notably it builds a
 real ONNX Runtime session instead of trusting get_available_providers(), which
@@ -13,7 +17,8 @@ import pathlib
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
+# The project packages live in src/; data/ and state/ stay beside it.
+sys.path.insert(0, str(ROOT / "src"))
 
 RESULTS = []
 
