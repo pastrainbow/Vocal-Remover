@@ -235,6 +235,8 @@ main h2 {
   width: 18px;
   height: 18px;
 }
+/* Marks a value that came from the model rather than from a saved setting. */
+.field__note { font-size: 11px; color: var(--muted); }
 
 /* ----------------------------------------------------------------- jobs */
 

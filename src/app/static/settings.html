@@ -15,9 +15,12 @@
 
 <main>
   <p class="hint">
-    Pick a loaded model to adjust its inference parameters. Fields marked
-    <em>restart</em> are read once at startup, so a change needs the server
-    restarted before it takes effect; the rest apply to that model's next job.
+    Pick a loaded model to adjust its inference parameters. Every field shows
+    what the model is running with now; those marked <em>from the model</em>
+    are its own values rather than anything saved here, and stay that way
+    unless you change them. Fields marked <em>restart</em> are read once at
+    startup, so a change needs the server restarted before it takes effect;
+    the rest apply to that model's next job.
   </p>
 
   <ul id="model-list" class="status-list"></ul>

@@ -25,9 +25,9 @@ mutability has not been verified here.
 """
 import logging
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from . import errors
 
@@ -71,6 +71,29 @@ class ModelConfig(ABC):
         """Identity for duplicate detection when loading a batch."""
         return self.name
 
+    @classmethod
+    def own_fields(cls) -> Tuple[str, ...]:
+        """Field names this architecture adds beyond ModelConfig itself.
+
+        The added set is exactly the architecture-specific part - what a
+        caller can meaningfully expose as a per-model setting, as opposed to
+        name/model_dir/use_autocast/log_level, which every architecture has.
+        """
+        base = {f.name for f in fields(ModelConfig)}
+        return tuple(f.name for f in fields(cls) if f.name not in base)
+
+    def read_applied(self, instance) -> Dict[str, Any]:
+        """What `instance` will ACTUALLY use, for this config's own fields.
+
+        The counterpart to arch_params(): that writes settings in, this reads
+        back what they became. They are not the same thing, because a None
+        here means "leave it to the model" and audio-separator resolves that
+        at load time from the model's own data - so this is the only way to
+        find out what a default actually is. Call it on a loaded model's
+        separator.model_instance.
+        """
+        return {name: getattr(instance, name) for name in self.own_fields()}
+
     @property
     @abstractmethod
     def arch_key(self) -> str:
@@ -105,6 +128,24 @@ class MDXCModelConfig(ModelConfig):
             # Without this flag MDXC accepts segment_size then ignores it.
             params["override_model_segment_size"] = True
         return params
+
+    def read_applied(self, instance) -> Dict[str, Any]:
+        """As ModelConfig.read_applied, minus one trap.
+
+        instance.segment_size is the value we handed over, which MDXC only
+        uses when override_model_segment_size is set - demix() otherwise
+        reads the model's own inference.dim_t and ignores the attribute
+        entirely. Reporting the attribute would therefore claim 256 for a
+        model actually running at its own segment size.
+
+        overlap and batch_size need no such care: MDXC resolves a None for
+        those in __init__, from the model's inference config and then its
+        own 8 and 1, so by the time anything can read them they are real.
+        """
+        applied = super().read_applied(instance)
+        if not instance.override_model_segment_size:
+            applied["segment_size"] = instance.model_data_cfgdict.inference.dim_t
+        return applied
 
 
 @dataclass(frozen=True)
@@ -197,6 +238,25 @@ class SeparationConfig(ABC):
 
     def __post_init__(self):
         object.__setattr__(self, "output_dir", Path(self.output_dir))
+
+    @classmethod
+    def own_fields(cls) -> Tuple[str, ...]:
+        """Field names this architecture adds beyond SeparationConfig itself.
+
+        As ModelConfig.own_fields, for the per-job half: overlap and
+        batch_size on MDXC and MDX, nothing on VR and Demucs.
+        """
+        base = {f.name for f in fields(SeparationConfig)}
+        return tuple(f.name for f in fields(cls) if f.name not in base)
+
+    def read_applied(self, instance) -> Dict[str, Any]:
+        """What `instance` will actually use, for this config's own fields.
+
+        The counterpart to _apply_arch(), which only writes a field when it
+        is not None - so a None here leaves whatever load_model() resolved,
+        and reading the instance is the only way to learn what that was.
+        """
+        return {name: getattr(instance, name) for name in self.own_fields()}
 
     def apply(self, instance) -> None:
         """Mutate a loaded model instance for this job.

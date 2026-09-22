@@ -3,7 +3,12 @@
 const el = (id) => document.getElementById(id);
 
 let currentModel = null;
-let currentSpec = null;  // the last GET/PUT response: {model, arch, load_time_fields, per_job_fields, kinds, values}
+let currentSpec = null;  // the last GET/PUT response: {model, arch, load_time_fields, per_job_fields, kinds, values, applied}
+//: What each input was drawn with, so submit can send only what changed.
+//: Prefilling an inherited value and then saving the whole form would turn
+//: "leave it to the model" into a pin on today's number, which is a
+//: behaviour change nobody asked for by pressing Save.
+let rendered = {};
 
 function node(tag, className, children) {
   const element = document.createElement(tag);
@@ -76,17 +81,29 @@ async function selectModel(name) {
 /** One <label class="field"> per param, built entirely from what the API
  *  says about this model - no per-architecture table in this file. `kind`
  *  ("bool" | "text" | "number") picks the input type; membership in
- *  load_time_fields vs per_job_fields picks the "(restart)" marker. */
+ *  load_time_fields vs per_job_fields picks the "(restart)" marker.
+ *
+ *  A saved null means "leave it to the model", which is not something to
+ *  show as an empty box - `applied` carries what the loaded model actually
+ *  resolved it to, so that is what goes in the field, noted as inherited. */
 function renderForm(spec) {
   el("params-heading").textContent = `${spec.model} (${spec.arch})`;
 
   const fields = el("params-fields");
   fields.innerHTML = "";
   const restartFields = new Set(spec.load_time_fields);
+  const applied = spec.applied || {};
+  rendered = {};
 
   for (const name of [...spec.load_time_fields, ...spec.per_job_fields]) {
     const kind = spec.kinds[name];
-    const value = spec.values[name];
+    const saved = spec.values[name];
+    const inherited = saved === null || saved === undefined;
+    // Nothing to inherit when the model is not loaded: leave it blank and
+    // let the placeholder say so rather than invent a number.
+    const shown = inherited && applied[name] !== undefined && applied[name] !== null
+      ? applied[name]
+      : saved;
 
     const input = document.createElement("input");
     input.id = `field-${name}`;
@@ -94,37 +111,54 @@ function renderForm(spec) {
 
     if (kind === "bool") {
       input.type = "checkbox";
-      input.checked = Boolean(value);
+      input.checked = Boolean(shown);
     } else if (kind === "number") {
       input.type = "number";
       input.step = "any";
       input.placeholder = "model default";
-      input.value = value === null || value === undefined ? "" : value;
+      input.value = shown === null || shown === undefined ? "" : shown;
     } else {
       input.type = "text";
-      input.value = value ?? "";
+      input.value = shown ?? "";
     }
 
+    rendered[name] = readInput(input, kind);
+
     const labelText = prettify(name) + (restartFields.has(name) ? " (restart)" : "");
-    fields.append(node("label", "field", [node("span", "", labelText), input]));
+    const parts = [node("span", "", labelText), input];
+    if (inherited && shown !== null && shown !== undefined) {
+      const note = node("span", "field__note", "from the model");
+      // Stops the note describing a value the user has since replaced.
+      input.addEventListener("input", () => {
+        note.hidden = !same(readInput(input, kind), rendered[name]);
+      });
+      parts.push(note);
+    }
+    fields.append(node("label", "field", parts));
   }
 
   el("params-form").hidden = false;
 }
 
-function readForm(spec) {
+function readInput(input, kind) {
+  if (kind === "bool") return input.checked;
+  if (kind === "number") {
+    const raw = input.value.trim();
+    return raw === "" ? null : Number(raw);
+  }
+  return input.value;
+}
+
+const same = (a, b) => a === b || (a === null && b === null);
+
+/** Only what the user actually changed. The API merges a partial body, so
+ *  anything left alone keeps its stored state - in particular an inherited
+ *  field stays inherited rather than being pinned to the number shown. */
+function changedFields(spec) {
   const body = {};
   for (const name of [...spec.load_time_fields, ...spec.per_job_fields]) {
-    const input = el(`field-${name}`);
-    const kind = spec.kinds[name];
-    if (kind === "bool") {
-      body[name] = input.checked;
-    } else if (kind === "number") {
-      const raw = input.value.trim();
-      body[name] = raw === "" ? null : Number(raw);
-    } else {
-      body[name] = input.value;
-    }
+    const value = readInput(el(`field-${name}`), spec.kinds[name]);
+    if (!same(value, rendered[name])) body[name] = value;
   }
   return body;
 }
@@ -146,7 +180,7 @@ el("params-form").addEventListener("submit", async (event) => {
       {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(readForm(currentSpec)),
+        body: JSON.stringify(changedFields(currentSpec)),
       },
     );
     const result = await response.json();

@@ -10,10 +10,10 @@ already picks a model and format per job.
 This module is deliberately thin. The field names, defaults and (for
 MDXC/MDX) validation already live in
 vocal_remove.config.ModelConfig/SeparationConfig and their four
-per-architecture subclasses, so nothing here redeclares them - it only works
-out which fields a subclass adds beyond its abstract base (that "added" set
-IS the architecture-specific, worth-exposing part) and reads/writes them as
-a plain dict. See load_params() and _own_fields().
+per-architecture subclasses, so nothing here redeclares them: which fields
+an architecture has comes from their own_fields(), and what a saved value
+becomes in practice from their read_applied(). This module only reads and
+writes those fields as a plain dict. See load_params().
 
 Importing vocal_remove.config does NOT pull in torch or audio_separator -
 those arrive only through vocal_remove.separator, which vocal_remove's
@@ -25,11 +25,11 @@ like db.py and jobs.py - see tests/test_jobs.py for why that matters.
 import json
 import logging
 import typing
-from dataclasses import dataclass, fields
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
-from vocal_remove.config import ModelConfig, SeparationConfig, config_classes_for
+from vocal_remove.config import config_classes_for
 from vocal_remove.errors import InvalidConfig
 
 logger = logging.getLogger("app.model_settings")
@@ -62,19 +62,6 @@ def _read_json(path: Path) -> Optional[dict]:
     except (OSError, json.JSONDecodeError) as exc:
         logger.warning("could not read %s (%s: %s)", path, type(exc).__name__, exc)
         return None
-
-
-def _own_fields(cls, base) -> Tuple[str, ...]:
-    """Field names `cls` adds beyond `base`.
-
-    That's the architecture-specific part - segment_size and pitch_shift for
-    MDXCModelConfig, say, as opposed to name/model_dir/use_autocast/log_level
-    which every ModelConfig has regardless of architecture. This is what
-    makes the per-architecture field sets fall out of vocal_remove.config
-    automatically instead of being hand-listed here.
-    """
-    base_names = {f.name for f in fields(base)}
-    return tuple(f.name for f in fields(cls) if f.name not in base_names)
 
 
 def _kind_for(annotation) -> str:
@@ -140,8 +127,8 @@ class ModelParams:
 
 
 def _field_specs(model_cls, sep_cls):
-    load_fields = _own_fields(model_cls, ModelConfig)
-    job_fields = _own_fields(sep_cls, SeparationConfig)
+    load_fields = model_cls.own_fields()
+    job_fields = sep_cls.own_fields()
     hints = {**typing.get_type_hints(model_cls), **typing.get_type_hints(sep_cls)}
     kinds = {name: _kind_for(hints[name]) for name in (*load_fields, *job_fields)}
     return load_fields, job_fields, kinds

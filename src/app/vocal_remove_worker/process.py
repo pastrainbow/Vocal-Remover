@@ -143,7 +143,34 @@ def _describe(model: vr.LoadedModel) -> dict:
         "device": model.device if model.ok else None,
         "load_seconds": round(model.load_seconds, 1) if model.ok else None,
         "error": model.error,
+        "applied": _applied(model),
     }
+
+
+def _applied(model: vr.LoadedModel) -> dict:
+    """What this model is actually running with, param by param.
+
+    This process is the only one that can answer that. A param left unset
+    means "whatever the model itself says", and audio-separator resolves
+    that from the checkpoint's own data while loading - so the numbers exist
+    nowhere until a model is live, and only here. The settings page shows
+    them instead of an empty box.
+
+    Never raises: these are read through audio-separator's instance
+    attributes, and a version that moves one is worth a blank field and a
+    warning, not a worker that will not start.
+    """
+    if not model.ok:
+        return {}
+    _, sep_cls = vr.config_classes_for(model.config.name)
+    instance = model.separator.model_instance
+    try:
+        return {**model.config.read_applied(instance),
+                **sep_cls().read_applied(instance)}
+    except Exception:  # noqa: BLE001 - see the docstring
+        logger.warning("could not read the applied params for %s",
+                       model.config.name, exc_info=True)
+        return {}
 
 
 # --------------------------------------------------------------------- loop
