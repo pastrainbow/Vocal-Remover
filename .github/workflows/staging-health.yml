@@ -1,0 +1,120 @@
+# Keep staging up without anyone touching the box.
+#
+# The deploy workflow only runs when you push. That leaves two ways for the
+# app to be down with no pending commit to fix it: the box rebooted, or the
+# server process died. Both would otherwise need a human at the machine, or
+# at least a Re-run click - so this checks every 15 minutes and repairs what
+# it finds.
+#
+# A healthy box makes this a ~20 second no-op: one HTTP call, one
+# `tailscale serve status`, done.
+name: Staging health
+
+on:
+  schedule:
+    # Every 15 minutes. GitHub runs schedules in UTC and delays them under
+    # load, so treat this as "roughly every 15 minutes", not a guarantee.
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+# Deliberately the SAME group as deploy-staging, so a repair and a deploy can
+# never run at once and fight over the venv, the port and the pid file.
+# cancel-in-progress is false here while the deploy sets it true: a new deploy
+# should supersede a pending health check, but a health check should wait for
+# a deploy rather than cancel it.
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Check and repair
+    runs-on: [self-hosted, windows, gpu]
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          clean: false
+
+      - name: Is the app healthy?
+        id: health
+        shell: powershell
+        run: |
+          # continue on failure: an unhealthy app is the thing this workflow
+          # exists to find, not a reason to stop.
+          $ok = $false
+          try {
+            $r = Invoke-RestMethod -Uri 'http://127.0.0.1:8000/api/health' -TimeoutSec 10
+            # Running but with a model unloaded is still broken - the worker
+            # would accept jobs it cannot finish.
+            $bad = @($r.worker.models | Where-Object { $_.status -ne 'loaded' })
+            $ok = $r.worker.running -and $bad.Count -eq 0
+            if (-not $ok) { Write-Host "unhealthy: running=$($r.worker.running) bad-models=$($bad.Count)" }
+          }
+          catch {
+            Write-Host "not answering: $_"
+          }
+          "healthy=$($ok.ToString().ToLower())" >> $env:GITHUB_OUTPUT
+          if ($ok) { Write-Host 'app is healthy' }
+
+      # The full deploy, not just a restart: if the app died because a sync
+      # was interrupted or a model file went missing, only the full sequence
+      # fixes it, and it costs seconds when there is nothing to do.
+      - name: Repair
+        if: steps.health.outputs.healthy != 'true'
+        shell: powershell
+        run: |
+          Write-Host '::warning::staging was down - running a full deploy to repair it'
+          ./setup/deploy.ps1
+
+      - name: Ensure Tailscale is serving it
+        shell: powershell
+        run: |
+          $ts = Join-Path $env:ProgramFiles 'Tailscale\tailscale.exe'
+          if (-not (Test-Path $ts)) {
+            Write-Host '::warning::tailscale.exe not found; skipping serve check'
+            exit 0
+          }
+
+          $status = & $ts serve status 2>&1 | Out-String
+          if ($status -match '127\.0\.0\.1:8000') {
+            Write-Host 'tailscale serve is configured'
+            exit 0
+          }
+
+          Write-Host '::warning::tailscale serve lost its config - re-applying'
+          & $ts serve --bg 8000
+          if ($LASTEXITCODE -ne 0) {
+            # Writing serve config needs elevation on Windows, which the
+            # runner may not have. Not fatal here: the endpoint check below
+            # is what decides whether staging is actually reachable, and a
+            # failed workflow is the notification either way.
+            Write-Host '::warning::could not re-apply (elevation?); see the endpoint check'
+          }
+
+      # The check that actually matters - the path your phone uses. Failing
+      # here is what turns a silent outage into a GitHub notification.
+      - name: Verify the public endpoint
+        shell: powershell
+        run: |
+          $base = '${{ vars.STAGING_URL }}'.TrimEnd('/')
+          if (-not $base) {
+            Write-Host '::warning::STAGING_URL is not set; skipping'
+            exit 0
+          }
+          try {
+            $r = Invoke-RestMethod -Uri "$base/api/health" -TimeoutSec 20
+          }
+          catch {
+            Write-Host "::error::$base is not reachable: $_"
+            exit 1
+          }
+          if (-not $r.worker.running) {
+            Write-Host '::error::endpoint answered but the worker is not running'
+            exit 1
+          }
+          Write-Host "staging is healthy at $base"

@@ -43,11 +43,25 @@ on:
         default: false
 
 # Never two deploys at once: they would fight over the venv, the port and the
-# pid file. Queue instead of cancelling - a half-applied deploy that gets
-# cancelled mid-sync leaves the box worse off than one that simply waits.
+# pid file.
+#
+# cancel-in-progress is true rather than false, which is the opposite of the
+# usual advice for deploys. Queueing sounds safer until a run wedges - a job
+# queued when no matching runner exists is never rescheduled, and
+# timeout-minutes does not apply to a job that has not started - and then
+# every later deploy stacks up behind it forever. That is not hypothetical;
+# it is what happened on 2026-09-22 and it needed the force-cancel API to
+# clear.
+#
+# Cancelling mid-deploy is the lesser risk here because run.sh repairs
+# itself: it re-imports torch/onnxruntime/fastapi on every run and re-syncs
+# when that fails, and it only stamps .installed-from AFTER a sync completes,
+# so an interrupted install is detected and redone rather than trusted. The
+# worst a cancelled deploy leaves behind is a stopped app, which the run that
+# superseded it is about to start anyway.
 concurrency:
   group: deploy-staging
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -84,7 +98,7 @@ jobs:
 
       - name: Record current revision
         id: previous
-        shell: pwsh
+        shell: powershell
         run: |
           # Written before anything changes, so the rollback step below has
           # somewhere to go back to.
@@ -93,7 +107,7 @@ jobs:
           "sha=$prev" >> $env:GITHUB_OUTPUT
 
       - name: Deploy
-        shell: pwsh
+        shell: powershell
         run: ./setup/deploy.ps1
 
       # Same URL the phone uses. The step above already proved 127.0.0.1 is
@@ -102,13 +116,17 @@ jobs:
       # "tailscale serve was dropped".
       - name: Verify Tailscale endpoint
         if: ${{ vars.STAGING_URL != '' }}
-        shell: pwsh
+        shell: powershell
         run: |
+          # TrimEnd because the variable may carry a trailing slash, and
+          # Starlette will not match '//api/health' to the '/api/health'
+          # route - it would fall through to the static mount and 404.
+          $base = '${{ vars.STAGING_URL }}'.TrimEnd('/')
           try {
-            $r = Invoke-RestMethod -Uri "${{ vars.STAGING_URL }}/api/health" -TimeoutSec 20
+            $r = Invoke-RestMethod -Uri "$base/api/health" -TimeoutSec 20
           }
           catch {
-            Write-Host "::error::${{ vars.STAGING_URL }} is not serving: $_"
+            Write-Host "::error::$base is not serving: $_"
             Write-Host 'Check `tailscale serve status` on the box.'
             exit 1
           }
@@ -116,7 +134,7 @@ jobs:
             Write-Host '::error::endpoint answered but the worker is not running'
             exit 1
           }
-          Write-Host "staging is live at ${{ vars.STAGING_URL }}"
+          Write-Host "staging is live at $base"
 
       # Best-effort: get the box back to the last known-good commit rather
       # than leaving it down. Deliberately does not re-run the health gate -
@@ -124,7 +142,7 @@ jobs:
       # failure here would only bury the original error.
       - name: Roll back on failure
         if: ${{ failure() && steps.previous.outputs.sha != '' }}
-        shell: pwsh
+        shell: powershell
         run: |
           Write-Host "::warning::deploy failed, rolling back to ${{ steps.previous.outputs.sha }}"
           git checkout --force ${{ steps.previous.outputs.sha }}
@@ -132,7 +150,7 @@ jobs:
 
       - name: Summary
         if: always()
-        shell: pwsh
+        shell: powershell
         run: |
           $status = if ('${{ job.status }}' -eq 'success') { 'deployed' } else { 'FAILED' }
           @"
