@@ -68,6 +68,13 @@ class ModelConfig:
     #: Ignored by ONNX models, which run at their native precision.
     use_autocast: bool = True
 
+    #: Regional torch.compile of the RoFormer transformer blocks: 62.7s ->
+    #: 36.4s on a 120s excerpt (RTX 3060), stems within 74 dB of eager.
+    #: Needs Triton - triton-windows on Windows, see requirements/app.in -
+    #: and without it audio-separator falls back to eager inference. CUDA
+    #: only; ignored by ONNX models.
+    use_torch_compile: bool = True
+
     log_level: int = logging.WARNING
 
     def __post_init__(self):

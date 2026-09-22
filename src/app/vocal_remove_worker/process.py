@@ -135,6 +135,7 @@ def _describe(model: vr.LoadedModel) -> dict:
         "status": model.status.value,
         "device": model.device if model.ok else None,
         "load_seconds": round(model.load_seconds, 1) if model.ok else None,
+        "compiled": model.compiled if model.ok else None,
         "error": model.error,
     }
 

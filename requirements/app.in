@@ -38,6 +38,14 @@ onnxruntime-gpu==1.22.0
 
 audio-separator[gpu]==0.47.0
 
+# torch.compile's GPU backend. torch's Linux wheels depend on triton; its
+# Windows wheels do not, and upstream triton ships no Windows build, so this is
+# the community port. Without it torch.compile fails at the first forward and
+# audio-separator falls back to eager inference - about 2x slower on
+# BS-Roformer, measured on an RTX 3060. The minor version must track torch's:
+# triton-windows 3.4 is the build for torch 2.8.
+triton-windows>=3.4,<3.5; sys_platform == "win32"
+
 # --- Tidal downloader -----------------------------------------------------
 # python-tidal handles auth, metadata and stream resolution. It is maintained
 # (0.8.x, Jan 2026) and, critically, tracks Tidal's client credentials: the

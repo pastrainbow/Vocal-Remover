@@ -205,6 +205,8 @@ scipy==1.17.1
     #   audio-separator
     #   librosa
     #   scikit-learn
+setuptools==84.0.0
+    # via triton-windows
 six==1.17.0
     # via
     #   audio-separator
@@ -244,6 +246,8 @@ torchvision==0.23.0+cu128
     #   onnx2torch-py313
 tqdm==4.70.1
     # via audio-separator
+triton-windows==3.4.0.post21
+    # via -r requirements/app.in
 typing-extensions==4.16.0
     # via
     #   anyio

@@ -14,8 +14,8 @@ separate() is asynchronous because separation takes 20-126s and callers need
 to show progress while it runs; see the Separation class below.
 
 init_models() is deliberately separate from separate() because loading costs
-1.6-3.3s warm (and 20-30s cold, including the download) while separation takes
-20-126s depending on the model. Hold the returned models for the lifetime of
+1.6-3.3s warm (and 20-30s cold, including the download), plus ~10s to compile
+a RoFormer model, while separation takes 20-126s depending on the model. Hold the returned models for the lifetime of
 the worker process rather than reloading per job.
 
 It takes a LIST so a worker can bring up every model it might be asked for in
@@ -28,13 +28,14 @@ so one unusable model does not stop the others loading.
 # slower, with no error anywhere. See requirements/app.in.
 import torch  # noqa: F401  # isort: skip
 
+import contextlib
 import logging
 import threading
 import time
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import Iterable, List, Optional, Tuple
 
 from audio_separator.separator import Separator
 
@@ -81,6 +82,9 @@ class LoadedModel:
     device: str = "cpu"
     load_seconds: float = 0.0
     error: Optional[str] = None
+    #: Whether torch.compile survived warm-up. False for ONNX models, and for
+    #: a RoFormer whose compile failed and fell back to eager (~2x slower).
+    compiled: bool = False
 
     #: Serialises separations on this model. audio-separator keeps per-job
     #: settings (output dir, output format) on the one shared model instance,
@@ -150,8 +154,16 @@ def _load_one(config: ModelConfig) -> LoadedModel:
             model_file_dir=str(config.model_dir),
             output_dir=str(config.model_dir),  # replaced per job in separate()
             use_autocast=config.use_autocast,
+            # CUDA only: that is the only device it was measured on, and the
+            # CPU backend needs a C++ compiler this project does not install.
+            use_torch_compile=(config.use_torch_compile
+                               and torch.cuda.is_available()),
         )
         separator.load_model(config.name)
+        _use_cudnn_attention(separator.model_instance)
+        # Inside the try: a model that cannot run one window cannot run a
+        # job, and should fail here rather than on the first submission.
+        warm_seconds = _warm_up(separator)
     except Exception as exc:
         detail = f"{type(exc).__name__}: {exc}"
         logger.warning("could not load %r: %s", config.name, detail)
@@ -159,6 +171,18 @@ def _load_one(config: ModelConfig) -> LoadedModel:
 
     device = str(getattr(separator, "torch_device", "cpu"))
     load_seconds = time.time() - started
+    compiled = bool(separator.effective_torch_compile)
+
+    if warm_seconds is not None:
+        logger.info("warmed up %s in %.1fs (%s)", config.name, warm_seconds,
+                    "compiled" if compiled else "eager")
+        if config.use_torch_compile and device.startswith("cuda") \
+                and not compiled:
+            logger.warning(
+                "%r is running without torch.compile, about 2x slower - is "
+                "triton-windows installed? See requirements/app.in.",
+                config.name,
+            )
 
     if not device.startswith("cuda"):
         logger.warning(
@@ -173,7 +197,107 @@ def _load_one(config: ModelConfig) -> LoadedModel:
         separator=separator,
         device="cuda" if device.startswith("cuda") else device,
         load_seconds=load_seconds,
+        compiled=compiled,
     )
+
+
+def _use_cudnn_attention(instance) -> int:
+    """Send RoFormer attention to cuDNN's fused kernel. Returns modules changed.
+
+    audio-separator enables the flash kernel only on an A100 and gives every
+    other GPU memory-efficient attention. Flash is not available here anyway,
+    because torch's Windows wheels are built without it, but cuDNN's fused kernel is. With the
+    transformer blocks compiled it measured 36.4s -> 30.8s on the RTX 3060
+    benchmark, with stems within 74 dB of the default kernel. (Uncompiled it
+    made no difference: attention is too small a share of the eager forward
+    pass to show.)
+
+    Clearing all three legacy flags leaves only cuDNN, which _sdpa_backends()
+    always appends; a mem-efficient fallback beside it would win on torch's
+    own backend priority and undo the change. If cuDNN cannot take a shape,
+    the warm-up window fails at load time, not on a job.
+
+    This is a PRIVATE-API dependency, like progress.py: Attend.cuda_config in
+    audio-separator 0.47.0. cuda_config is None off CUDA or with flash_attn
+    disabled in the model config, and those modules are left alone.
+    """
+    model = getattr(instance, "model_run", None)
+    if not isinstance(model, torch.nn.Module):
+        return 0  # ONNX: an inference session, no attention modules to set
+
+    from audio_separator.separator.uvr_lib_v5.roformer.attend import (
+        Attend, FlashAttentionConfig)
+
+    cudnn_only = FlashAttentionConfig(enable_flash=False, enable_math=False,
+                                      enable_mem_efficient=False)
+    changed = 0
+    for module in model.modules():
+        if isinstance(module, Attend) and module.cuda_config is not None:
+            module.cuda_config = cudnn_only
+            changed += 1
+    return changed
+
+
+def _warm_up(separator: Separator) -> Optional[float]:
+    """Run one silent window through a RoFormer model and discard the output.
+
+    torch.compile compiles on the first forward pass, not in load_model():
+    about 10s on the benchmark. Running one pass here moves that into worker
+    startup, which is waited on anyway, instead of onto the first job.
+
+    The window has to be exactly the shape demix() will feed, because a
+    different shape is a different graph and would compile again on the
+    first job. So its length comes from the model's own segment config (see
+    _roformer_window) rather than from any fixed duration, and the precision
+    context matches the one Separator.separate() opens around demix().
+
+    Returns the seconds taken, or None for a model that has nothing to warm
+    up: ONNX, and the non-RoFormer MDXC models, which are not compiled.
+    """
+    instance = separator.model_instance
+    if not getattr(instance, "is_roformer", False):
+        return None
+
+    from audio_separator.separator.execution_policy import AUTOCAST
+
+    channels, samples = _roformer_window(instance)
+    device = next(instance.model_run.parameters()).device
+    window = torch.zeros(channels, samples, device=device)
+    precision = (torch.autocast(device.type)
+                 if separator.effective_precision == AUTOCAST
+                 else contextlib.nullcontext())
+
+    started = time.time()
+    # _run_roformer_model rather than model_run: it is what demix() calls,
+    # and it owns audio-separator's fallback to eager when a compile fails.
+    with torch.no_grad(), precision:
+        instance._run_roformer_model(window)
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    return time.time() - started
+
+
+def _roformer_window(instance) -> Tuple[int, int]:
+    """(channels, samples) of one demix() window for a RoFormer model.
+
+    Mirrors mdxc_separator.demix() in audio-separator 0.47.0. dim_t is the
+    model's own inference.dim_t unless override_model_segment_size says to
+    use segment_size instead. The window is stft_hop_length * (dim_t - 1)
+    samples, falling back to audio.hop_length when the model config has no
+    STFT hop, as demix() does. For BS-Roformer that is 441 * 800 = 352800
+    samples, 8.0s at 44.1kHz.
+
+    Channels come from the model config. prepare_mix() always hands demix()
+    stereo, and a model that disagreed with its own config would fail on
+    real audio too.
+    """
+    cfg = instance.model_data_cfgdict
+    dim_t = (instance.segment_size if instance.override_model_segment_size
+             else cfg.inference.dim_t)
+    hop = getattr(cfg.model, "stft_hop_length", None)
+    if hop is None:
+        hop = cfg.audio.hop_length
+    return int(cfg.audio.num_channels), int(hop) * (int(dim_t) - 1)
 
 
 def separate(
