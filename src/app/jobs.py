@@ -292,17 +292,21 @@ def _evict(conn: sqlite3.Connection, job: Job) -> None:
         conn.execute("DELETE FROM jobs WHERE id=?", (job.id,))
 
 
-def reset_orphans(conn: sqlite3.Connection) -> int:
+def reset_orphans(conn: sqlite3.Connection,
+                  reason: str = "interrupted by a restart") -> int:
     """Fail jobs left mid-flight by a crash or restart.
 
     The worker is the only thing that advances a job past `queued`, so
-    anything found in an active stage at startup belongs to a dead process.
+    anything found in an active stage belongs to a dead process. Called at
+    startup, and again whenever the worker process dies under a job - which
+    is what `reason` is for: "the worker ran out of memory" is worth showing,
+    and is not the same story as a server that was restarted by hand.
     """
     with conn:
         cur = conn.execute(
             """UPDATE jobs SET stage=?, error=?, updated_at=?, finished_at=?
                 WHERE stage IN (?, ?)""",
-            (Stage.FAILED.value, "interrupted by a restart", _now(), _now(),
+            (Stage.FAILED.value, reason, _now(), _now(),
              Stage.DOWNLOADING.value, Stage.SEPARATING.value),
         )
     return cur.rowcount

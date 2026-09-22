@@ -19,7 +19,7 @@ import tidal_download as td
 
 from . import db, jobs as jobs_repo
 from .config import Settings
-from .worker import Worker
+from .vocal_remove_worker import Worker
 
 logger = logging.getLogger("app.api")
 
@@ -39,14 +39,27 @@ def get_worker(request: Request) -> Worker:
     return request.app.state.worker
 
 
-def get_login(request: Request) -> td.LoginFlow:
-    """The worker's Tidal session drives the login, so signing in from the
-    page is all the worker needs - there is nothing to hand over."""
-    worker = request.app.state.worker
-    if worker.client is None:
+def get_tidal(request: Request) -> Optional[td.TidalClient]:
+    """The Tidal session, or None if the app has not finished starting.
+
+    It lives in this process, not the worker's, so it survives a worker
+    crash: a restart does not sign anybody out.
+    """
+    return getattr(request.app.state, "tidal", None)
+
+
+def require_tidal(request: Request) -> td.TidalClient:
+    client = get_tidal(request)
+    if client is None:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE,
-                            "worker is not running; restart the server")
-    return worker.client.login
+                            "no Tidal session yet; restart the server")
+    return client
+
+
+def get_login(request: Request) -> td.LoginFlow:
+    """Signing in from the page is all the worker needs - it reads the
+    session file this writes on its next job."""
+    return require_tidal(request).login
 
 
 def get_settings_dep(request: Request) -> Settings:
@@ -75,12 +88,13 @@ class SubmitRequest(BaseModel):
 
 @router.get("/health")
 def health(worker: Worker = Depends(get_worker),
+           client: Optional[td.TidalClient] = Depends(get_tidal),
            settings: Settings = Depends(get_settings_dep)):
     """Everything a UI needs to decide what to show before accepting input."""
     try:
-        auth = worker.client.auth_status() if worker.client else None
+        auth = client.auth_status() if client else None
         authenticated = bool(auth and auth.valid)
-        auth_detail = auth.detail if auth else "worker not started"
+        auth_detail = auth.detail if auth else "server not started"
     except Exception as exc:  # never let a health check 500
         authenticated, auth_detail = False, f"auth check failed: {exc}"
 
@@ -136,18 +150,16 @@ def login_status(flow: td.LoginFlow = Depends(get_login)):
 
 
 @router.post("/logout")
-def logout(worker: Worker = Depends(get_worker)):
+def logout(client: td.TidalClient = Depends(require_tidal)):
     """Delete the stored Tidal session and drop the live one.
 
     Removes state/tidal/session.json, so signing back in means approving a
-    new device code. A job already downloading will fail with an auth error -
-    the session it was using has gone. Abandoning a login still in flight is
-    part of logout() itself.
+    new device code. A job already downloading holds its own tokens in the
+    worker process and is likely to finish; the next job to start finds no
+    session and fails with an auth error. Abandoning a login still in flight
+    is part of logout() itself.
     """
-    if worker.client is None:
-        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE,
-                            "worker is not running; restart the server")
-    worker.client.logout()
+    client.logout()
     logger.info("tidal session cleared")
     return {"authenticated": False}
 
@@ -158,6 +170,7 @@ def logout(worker: Worker = Depends(get_worker)):
 @router.post("/jobs")
 def submit_job(body: SubmitRequest, response: Response,
                worker: Worker = Depends(get_worker),
+               client: td.TidalClient = Depends(require_tidal),
                settings: Settings = Depends(get_settings_dep),
                conn: sqlite3.Connection = Depends(get_conn)):
     """Queue a separation, or hand back work that already covers it.
@@ -171,21 +184,23 @@ def submit_job(body: SubmitRequest, response: Response,
     output_format = (body.output_format or settings.output_format).upper()
 
     if not worker.running:
+        # The worker restarts itself, so this is usually a few seconds rather
+        # than a state to report and forget - say what it is doing.
         raise HTTPException(
             status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="worker is not running; restart the server",
+            detail=f"worker is not running ({worker.status()['detail']})",
         )
-    if model not in worker.models:
+    if model not in worker.loaded_models:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
             detail=f"model {model!r} is not loaded; available: "
-                   f"{sorted(worker.models)}",
+                   f"{sorted(worker.loaded_models)}",
         )
 
     # Resolve before creating anything: a bad URL should be a 400, not a job
     # that fails three seconds later.
     try:
-        info = worker.client.resolve(body.url)
+        info = client.resolve(body.url)
     except td.AuthError as exc:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc))
     except (td.UnsupportedUrl, td.NotFound) as exc:

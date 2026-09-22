@@ -26,10 +26,17 @@ async function loadHealth() {
     const loaded = worker.models.filter((m) => m.status === "loaded");
     const device = loaded.length ? loaded[0].device : "?";
     setPill(`${loaded.length} model${loaded.length === 1 ? "" : "s"} on ${device}`, "ok");
+    // Clear a banner from an earlier poll: the worker can come back on its
+    // own now, so "down" is a state the page has to be able to leave.
+    el("worker-warning").hidden = true;
   } else {
     setPill("worker down", "error");
     const w = el("worker-warning");
-    w.textContent = "The worker is not running. Restart the server.";
+    // The worker restarts itself, so `detail` is usually "restarting in 5s
+    // after: ..." rather than something to act on. Show it either way: the
+    // reason it went down is the useful part, and the one case that does
+    // need a human says so itself.
+    w.textContent = `The worker is not running - ${worker.detail}.`;
     w.hidden = false;
   }
 

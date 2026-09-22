@@ -15,6 +15,13 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 #: state/ live beside src/, not inside it.
 _ROOT = Path(__file__).resolve().parents[2]
 
+#: Shared by both processes. The worker is spawned, not forked, so it starts
+#: with logging unconfigured and has to set this up for itself - keeping the
+#: format in one place is what stops the two halves of one terminal looking
+#: like two different programs.
+LOG_FORMAT = "%(asctime)s %(levelname)-7s %(name)s: %(message)s"
+LOG_DATEFMT = "%H:%M:%S"
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
