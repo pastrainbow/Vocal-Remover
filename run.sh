@@ -9,8 +9,9 @@
 #
 # The only entry point. Everything in setup/ is a helper this calls:
 #
-#   setup/bootstrap.ps1   Windows prerequisites, on a first run: uv, ffmpeg,
-#                         a CPython 3.11. Prints the interpreter to use.
+#   setup/bootstrap.ps1   Windows prerequisites, each installed if it is
+#                         missing: uv, ffmpeg, a CPython 3.11. Prints the
+#                         interpreter to use.
 #   setup/verify_env.py   checks that each layer actually works
 #   setup/fetch_models.py warms the model cache for --models
 #
@@ -18,8 +19,14 @@
 # half-installed one, or a lockfile newer than the last install all end in the
 # same place, so you do not have to think about which.
 #
-# Windows: run it from Git Bash. It uses the venv's python directly rather
-# than "activating" anything, so nothing leaks into your shell.
+# The same goes for the tools underneath: a missing one is installed rather
+# than reported. Nothing here stops to tell you to go and run an installer
+# first; only an install that fails is fatal.
+#
+# Windows: run it from Git Bash, or from PowerShell with
+#   & "C:\Program Files\Git\bin\bash.exe" ./run.sh
+# It uses the venv's python directly rather than "activating" anything, so
+# nothing leaks into your shell.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -53,39 +60,110 @@ venv_python() {
   fi
 }
 
+# ---------------------------------------------------------------- the tools
+
+#: Set by run_bootstrap, so a heal later in the run does not repeat it.
+bootstrap_ran=no
+
+have_bootstrap() {
+  command -v powershell.exe >/dev/null 2>&1 && [ -f "$ROOT/setup/bootstrap.ps1" ]
+}
+
+# The Windows half of "install what is missing": uv, ffmpeg, and a CPython
+# 3.11 to build the venv from. Its output is for you to read; the INTERPRETER=
+# and PATH_ADD= lines are for this script. \r has to go - the helper is
+# PowerShell, and its line endings are CRLF. Given a python as $1 it uses that
+# one and skips interpreter discovery, which is all a later heal needs.
+# Returns non-zero if it did not reach the end, so each caller decides how bad
+# that is.
+run_bootstrap() {
+  local ps1 args=() dir found
+  ps1="$(cygpath -w "$ROOT/setup/bootstrap.ps1" 2>/dev/null || echo "$ROOT/setup/bootstrap.ps1")"
+  if [ $# -gt 0 ]; then
+    args=(-Python "$(cygpath -w "$1" 2>/dev/null || echo "$1")")
+  fi
+
+  bootstrap_log="$(mktemp)"
+  trap 'rm -f "$bootstrap_log"' EXIT
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$ps1" "${args[@]}" \
+    | tee "$bootstrap_log" | tr -d '\r' | grep -vE '^(INTERPRETER|PATH_ADD)=' || true
+
+  # What it installed is on PATH for the next shell, not for this one: the
+  # installers edit the registry, and our copy of PATH was inherited before
+  # they did. Every directory it added comes back as a PATH_ADD= line.
+  while IFS= read -r dir; do
+    [ -n "$dir" ] || continue
+    dir="$(cygpath -u "$dir" 2>/dev/null || echo "$dir")"
+    case ":$PATH:" in *":$dir:"*) ;; *) PATH="$dir:$PATH" ;; esac
+  done < <(tr -d '\r' < "$bootstrap_log" | sed -n 's/^PATH_ADD=//p')
+  export PATH
+
+  found="$(tr -d '\r' < "$bootstrap_log" | sed -n 's/^INTERPRETER=//p' | tail -1)"
+  rm -f "$bootstrap_log"; trap - EXIT
+
+  [ -n "$found" ] || return 1
+  interpreter="$found"
+  bootstrap_ran=yes
+}
+
+#: Where the two installers leave uv, in the order they consult.
+uv_from_known_dirs() {
+  local dir
+  for dir in "${UV_INSTALL_DIR:-}" "${XDG_BIN_HOME:-}" "$HOME/.local/bin" "$HOME/.cargo/bin"; do
+    [ -n "$dir" ] || continue
+    if [ -x "$dir/uv" ] || [ -x "$dir/uv.exe" ]; then
+      case ":$PATH:" in *":$dir:"*) ;; *) PATH="$dir:$PATH"; export PATH ;; esac
+      command -v uv >/dev/null 2>&1 && return 0
+    fi
+  done
+  return 1
+}
+
+# uv builds the venv and installs every package into it, so it is the one tool
+# this script cannot go on without. On Windows bootstrap.ps1 has usually put
+# it there already; otherwise fetch it the way the docs tell you to.
+ensure_uv() {
+  command -v uv >/dev/null 2>&1 && return 0
+  uv_from_known_dirs && return 0
+
+  say "uv is not installed - installing it from astral.sh"
+  if command -v powershell.exe >/dev/null 2>&1; then
+    powershell.exe -NoProfile -ExecutionPolicy Bypass \
+      -Command "irm https://astral.sh/uv/install.ps1 | iex" || true
+  elif command -v curl >/dev/null 2>&1; then
+    curl -LsSf https://astral.sh/uv/install.sh | sh || true
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO- https://astral.sh/uv/install.sh | sh || true
+  else
+    die "no curl, wget or powershell to install uv with - see https://docs.astral.sh/uv/"
+  fi
+
+  # The installer appends its directory to your shell profile, which does
+  # nothing for the shell already running this.
+  uv_from_known_dirs || die \
+    "uv installed, but no uv on PATH afterwards - see https://docs.astral.sh/uv/"
+  say "uv $(uv --version | awk '{print $2}') installed"
+}
+
 # ------------------------------------------------------------- prerequisites
 
 [ -f "$LOCK" ] || die "no lockfile at $LOCK"
 
 if [ -z "$(venv_python)" ]; then
   interpreter=3.11
-  if command -v powershell.exe >/dev/null 2>&1 \
-     && [ -f "$ROOT/setup/bootstrap.ps1" ]; then
-    # First run on Windows: let the helper find or install an interpreter and
-    # check the tools that live outside the venv. Its output is for you to
-    # read; the INTERPRETER= line is for this script. \r has to go - the
-    # helper is PowerShell, and its line endings are CRLF.
-    bootstrap_log="$(mktemp)"
-    trap 'rm -f "$bootstrap_log"' EXIT
-    powershell.exe -NoProfile -ExecutionPolicy Bypass \
-      -File "$(cygpath -w "$ROOT/setup/bootstrap.ps1" 2>/dev/null || echo "$ROOT/setup/bootstrap.ps1")" \
-      | tee "$bootstrap_log" | tr -d '\r' | grep -v '^INTERPRETER=' || true
-    found="$(tr -d '\r' < "$bootstrap_log" | sed -n 's/^INTERPRETER=//p' | tail -1)"
-    rm -f "$bootstrap_log"; trap - EXIT
-    [ -n "$found" ] || die "setup/bootstrap.ps1 did not finish - see above"
-    interpreter="$found"
-  else
-    command -v uv >/dev/null 2>&1 || die \
-      "uv is not installed - see https://docs.astral.sh/uv/"
+  # First run on Windows: the helper installs the tools that live outside the
+  # venv, then finds or installs an interpreter to build it from.
+  if have_bootstrap; then
+    run_bootstrap || die "setup/bootstrap.ps1 did not finish - see above"
   fi
+  ensure_uv
 
   say "creating venv (python $interpreter)"
   uv venv "$VENV" --python "$interpreter" --allow-existing
   sync_mode=force
 fi
 
-command -v uv >/dev/null 2>&1 || die \
-  "uv is not installed - see https://docs.astral.sh/uv/"
+ensure_uv
 
 PY="$(venv_python)"
 [ -n "$PY" ] || die "venv at $VENV has no python"
@@ -118,11 +196,16 @@ if [ "$sync_mode" = force ]; then
 fi
 
 # ffmpeg lives outside every venv, so no lockfile can catch a missing one.
-# Only decode and remux need it, so this is a warning rather than a refusal to
-# start - bootstrap.ps1 treats it as fatal at setup time, which is the moment
-# to fix it.
-command -v ffmpeg >/dev/null 2>&1 || warn \
-  "ffmpeg not on PATH - downloads and separation will fail"
+# Only decode and remux need it, so a missing one does not stop the server
+# coming up - but it is a one-off install, so hand it to the helper rather
+# than leave you with a warning and a download button that fails.
+if ! command -v ffmpeg >/dev/null 2>&1; then
+  if [ "$bootstrap_ran" = no ] && have_bootstrap; then
+    run_bootstrap "$PY" || true
+  fi
+  command -v ffmpeg >/dev/null 2>&1 || warn \
+    "ffmpeg not on PATH - downloads and separation will fail"
+fi
 
 if [ "$get_models" = yes ]; then
   say "caching UVR models"
