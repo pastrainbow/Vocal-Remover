@@ -8,15 +8,22 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
   pull_request:
+  # Called by deploy-staging.yml so the deploy depends on these jobs directly
+  # rather than polling the checks API for them. Deliberately NOT `push: main`
+  # as well: the deploy triggers on that push and calls this, and a standalone
+  # trigger would run the same jobs a second time for the same commit.
+  workflow_call:
   workflow_dispatch:
 
-# A superseded run on the same branch is wasted work.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # github.workflow is the CALLER's name when this is reached through
+  # workflow_call, which keeps a deploy's CI run in a different group from a
+  # PR's rather than having them cancel each other.
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  # Superseding a PR run is free; superseding one that a deploy is waiting on
+  # would cancel the deploy with it.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read

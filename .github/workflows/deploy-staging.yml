@@ -45,27 +45,19 @@ permissions:
   contents: read
 
 jobs:
-  # Gate on CI rather than duplicating it. The box is the only staging
-  # environment there is, so a broken deploy means no app until it is fixed.
-  await-ci:
-    name: Await CI
-    runs-on: ubuntu-latest
+  # Gate on CI rather than duplicating it. Calling ci.yml makes that a real
+  # job dependency: no polling the checks API, and no race against a CI run
+  # that has not registered its checks yet on the same push.
+  ci:
+    name: CI
     if: ${{ !inputs.skip_ci }}
-    steps:
-      - uses: actions/checkout@v4
-      - name: Wait for CI to pass on this commit
-        uses: lewagon/wait-on-check-action@v1.3.4
-        with:
-          ref: ${{ github.sha }}
-          check-name: 'Tests and syntax'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-          wait-interval: 15
+    uses: ./.github/workflows/ci.yml
 
   deploy:
     name: Deploy to Tailscale box
-    needs: [await-ci]
-    # always() so a skipped await-ci (skip_ci) does not skip the deploy too.
-    if: ${{ always() && (needs.await-ci.result == 'success' || inputs.skip_ci) }}
+    needs: [ci]
+    # always() so a skipped ci job (skip_ci) does not skip the deploy with it.
+    if: ${{ always() && (needs.ci.result == 'success' || inputs.skip_ci) }}
     runs-on: [self-hosted, windows, gpu]
     environment:
       name: staging
