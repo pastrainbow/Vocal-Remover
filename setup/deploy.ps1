@@ -230,8 +230,18 @@ function Get-Models {
     # Pulling it into its own step gives the download no deadline and no
     # process waiting to be killed, and setup/fetch_models.py removes its own
     # partial files if it fails anyway.
-    Say 'run.sh --models (warm the model cache)'
-    & $Bash './run.sh' '--models'
+    #
+    # NOT `run.sh --models`. That flag is documented as "pre-download the UVR
+    # models, then START" - only --check exits - so calling it here fetched
+    # the models and then exec'd uvicorn in the FOREGROUND, attached to this
+    # step, which never returns. Every "deploy hangs after a successful
+    # startup" was this line. fetch_models.py is the helper run.sh calls for
+    # the download half, and calling it directly is the whole of what is
+    # wanted here.
+    Say 'prefetching models'
+    $python = Join-Path $Root 'venv\Scripts\python.exe'
+    if (-not (Test-Path $python)) { Die "no venv python at $python" }
+    & $python (Join-Path $Root 'setup\fetch_models.py')
     # Deliberately not fatal: a cached model with a dead network is still a
     # perfectly deployable box, and startup will fail loudly if it is not.
     if ($LASTEXITCODE -ne 0) {
