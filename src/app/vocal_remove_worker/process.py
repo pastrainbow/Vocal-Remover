@@ -101,14 +101,15 @@ def _load_models(settings: Settings) -> Tuple[Dict[str, vr.LoadedModel],
     around - hence a refusal rather than a degraded worker.
     """
     settings.ensure_dirs()
+    model_settings = settings.models
 
     configs = []
-    for name in settings.preload_models:
+    for name in model_settings.preload_models:
         model_cls, _ = vr.config_classes_for(name)
         configs.append(model_cls(
             name=name,
             model_dir=settings.models_dir,
-            segment_size=settings.segment_size,
+            segment_size=model_settings.segment_size,
         ))
 
     loaded = vr.init_models(configs)

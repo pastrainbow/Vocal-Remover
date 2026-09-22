@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Model Settings — Vocal Remover</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header>
+  <h1>Model settings</h1>
+  <a class="button--quiet" href="/">Back</a>
+</header>
+
+<main>
+  <p class="hint">
+    Saved to <code>state/model_settings.json</code>. The default model and
+    output format apply to the next job submitted. Preloaded models and
+    segment size are read once at startup, so changing either needs a server
+    restart before it takes effect.
+  </p>
+
+  <form id="settings-form" autocomplete="off">
+    <label class="field field--grow">
+      <span>Preloaded models (one filename per line)</span>
+      <textarea id="preload" rows="4" required
+                placeholder="model_bs_roformer_ep_317_sdr_12.9755.ckpt"></textarea>
+    </label>
+
+    <label class="field">
+      <span>Default model</span>
+      <select id="default-model" required></select>
+    </label>
+
+    <label class="field">
+      <span>Output format</span>
+      <select id="format">
+        <option value="FLAC">FLAC</option>
+        <option value="WAV">WAV</option>
+        <option value="MP3">MP3</option>
+      </select>
+    </label>
+
+    <label class="field">
+      <span>Segment size</span>
+      <input id="segment-size" type="number" min="1" step="1"
+             placeholder="model default">
+    </label>
+
+    <button id="save" type="submit">Save</button>
+  </form>
+
+  <div id="form-error" class="banner banner--error" hidden></div>
+  <div id="form-ok" class="banner banner--ok" hidden></div>
+
+  <h2>Currently loaded</h2>
+  <ul id="status-list" class="status-list"></ul>
+</main>
+
+<script src="/settings.js"></script>
+</body>
+</html>

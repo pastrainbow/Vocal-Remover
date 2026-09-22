@@ -8,7 +8,7 @@ import json
 import logging
 import sqlite3
 from pathlib import Path
-from typing import Iterator, Optional
+from typing import Iterator, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import FileResponse
@@ -17,7 +17,7 @@ from sse_starlette.sse import EventSourceResponse
 
 import tidal_download as td
 
-from . import db, jobs as jobs_repo
+from . import db, jobs as jobs_repo, model_settings as model_settings_repo
 from .config import Settings
 from .vocal_remove_worker import Worker
 
@@ -83,6 +83,13 @@ class SubmitRequest(BaseModel):
     output_format: Optional[str] = None
 
 
+class ModelSettingsRequest(BaseModel):
+    preload_models: List[str]
+    default_model: str
+    output_format: str
+    segment_size: Optional[int] = None
+
+
 # ------------------------------------------------------------------- health
 
 
@@ -114,8 +121,8 @@ def health(worker: Worker = Depends(get_worker),
             "ttl_seconds": settings.cache_ttl_seconds,
         },
         "defaults": {
-            "model": settings.default_model,
-            "output_format": settings.output_format,
+            "model": settings.models.default_model,
+            "output_format": settings.models.output_format,
         },
     }
 
@@ -123,6 +130,41 @@ def health(worker: Worker = Depends(get_worker),
 @router.get("/models")
 def list_models(worker: Worker = Depends(get_worker)):
     return {"models": worker.status()["models"]}
+
+
+# ------------------------------------------------------------ model settings
+
+
+@router.get("/settings/models")
+def get_model_settings(settings: Settings = Depends(get_settings_dep)):
+    return settings.models.to_dict()
+
+
+@router.put("/settings/models")
+def update_model_settings(body: ModelSettingsRequest,
+                          settings: Settings = Depends(get_settings_dep)):
+    """Save the model settings page's form to state/model_settings.json.
+
+    Only the default model and output format apply immediately - the worker
+    reads preload_models and segment_size once, at startup, so those two take
+    effect on the next server restart. Nothing here restarts it: doing that
+    automatically would kill whatever job is running mid-separation, which is
+    a bigger side effect than a settings save should have.
+    """
+    new = model_settings_repo.ModelSettings(
+        preload_models=body.preload_models,
+        default_model=body.default_model,
+        output_format=body.output_format.upper(),
+        segment_size=body.segment_size,
+    )
+    try:
+        model_settings_repo.save(settings.state_dir, new)
+    except model_settings_repo.InvalidModelSettings as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc))
+    logger.info("model settings updated: preload=%s default=%s format=%s "
+               "segment_size=%s", new.preload_models, new.default_model,
+               new.output_format, new.segment_size)
+    return new.to_dict()
 
 
 # -------------------------------------------------------------------- login
@@ -180,8 +222,8 @@ def submit_job(body: SubmitRequest, response: Response,
     submission runs a full download and separation only to be rejected by the
     unique cache index at the very end.
     """
-    model = body.model or settings.default_model
-    output_format = (body.output_format or settings.output_format).upper()
+    model = body.model or settings.models.default_model
+    output_format = (body.output_format or settings.models.output_format).upper()
 
     if not worker.running:
         # The worker restarts itself, so this is usually a few seconds rather

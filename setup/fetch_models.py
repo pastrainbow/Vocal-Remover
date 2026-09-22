@@ -41,7 +41,7 @@ def _wanted() -> list:
         sys.path.insert(0, str(ROOT / "src"))
         from app.config import get_settings
 
-        names = list(get_settings().preload_models)
+        names = list(get_settings().models.preload_models)
         if names:
             return names
     except Exception as exc:  # noqa: BLE001 - a helper, never a blocker

@@ -3,13 +3,21 @@
 Per-machine values live here rather than in code because the laptop (8 GiB)
 and the desktop (12 GiB) differ on what they can hold resident. Copy
 .env.example to .env and edit.
+
+Model configuration - which models to preload, the default, output format and
+segment size - is NOT here: it lives in state/model_settings.json (see
+model_settings.py) so the model settings page in the GUI can rewrite it at
+runtime. .env is still the right place for the rest, which is set once at
+deploy time and is not something a page should be able to change.
 """
 from functools import lru_cache
 from pathlib import Path
-from typing import List, Optional
+from typing import Optional
 
-from pydantic import Field, field_validator
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from . import model_settings as _model_settings
 
 #: The repo root: src/app/config.py -> src/app -> src -> here. data/ and
 #: state/ live beside src/, not inside it.
@@ -45,19 +53,6 @@ class Settings(BaseSettings):
     #: would get - unlikely, and not worth re-downloading to avoid.
     cache_ttl_seconds: Optional[int] = None
 
-    # --------------------------------------------------------------- models
-    #: Preloaded at startup and held resident. No lazy loading: if these do
-    #: not fit in VRAM together, startup fails loudly rather than degrading.
-    preload_models: List[str] = Field(default_factory=lambda: [
-        "model_bs_roformer_ep_317_sdr_12.9755.ckpt",
-        "UVR-MDX-NET-Voc_FT.onnx",
-    ])
-    default_model: str = "model_bs_roformer_ep_317_sdr_12.9755.ckpt"
-    output_format: str = "FLAC"
-
-    #: Only set if you hit CUDA OOM; trades separation quality for memory.
-    segment_size: Optional[int] = None
-
     # ----------------------------------------------------------------- http
     host: str = "127.0.0.1"
     port: int = 8000
@@ -85,6 +80,18 @@ class Settings(BaseSettings):
     @property
     def models_dir(self) -> Path:
         return self.data_dir / "models"
+
+    @property
+    def models(self) -> _model_settings.ModelSettings:
+        """Which models to preload, the default, format and segment size.
+
+        Re-read from state/model_settings.json on every access rather than
+        cached on self: this Settings instance is a long-lived singleton (see
+        get_settings()) and is also handed to the worker's child process at
+        spawn time, so a property is what lets a save from the settings page
+        reach both without either holding a stale copy.
+        """
+        return _model_settings.load(self.state_dir)
 
     @property
     def caching_enabled(self) -> bool:
