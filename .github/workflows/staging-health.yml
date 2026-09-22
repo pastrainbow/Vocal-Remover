@@ -33,7 +33,9 @@ jobs:
   check:
     name: Check and repair
     runs-on: [self-hosted, windows, gpu]
-    timeout-minutes: 30
+    # Matches deploy-staging.yml's job timeout: a repair is a full deploy, so
+    # it needs the same budget for a cold sync.
+    timeout-minutes: 45
 
     steps:
       - uses: actions/checkout@v4
@@ -66,14 +68,18 @@ jobs:
           if ($ok) { Write-Host 'app is healthy' }
 
       # The full deploy, not just a restart: if the app died because a sync
-      # was interrupted or a model file went missing, only the full sequence
-      # fixes it, and it costs seconds when there is nothing to do.
+      # was interrupted or a model file went missing, only run.sh's whole
+      # sequence fixes it, and it costs seconds when there is nothing to do.
       - name: Repair
         if: steps.health.outputs.healthy != 'true'
         shell: powershell
         # Bounded, so a repair that stops making progress cannot hold the
         # deploy-staging concurrency group and block real deploys behind it.
-        timeout-minutes: 20
+        # Matches the deploy's ceiling for the same reason it was raised
+        # there: this step now waits on the install and the model prefetch
+        # too. deploy.ps1 gives up the moment run.sh exits without a healthy
+        # app, so a repair that cannot work does not sit on the group.
+        timeout-minutes: 35
         # Must match deploy-staging.yml exactly, or a repair would install a
         # second copy beside the one the deploy maintains.
         env:

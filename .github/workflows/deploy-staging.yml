@@ -101,12 +101,24 @@ jobs:
           # clean: false the fetch is incremental after the first run.
           fetch-depth: 0
 
+      # The deploy is one call to ./run.sh - the same entry point a human
+      # uses, which installs, verifies, prefetches the models and starts the
+      # server, in that order, every time. No step here reaches past it into
+      # setup/, because a pipeline that installs differently from a person is
+      # a pipeline that green-lights a box nobody can reproduce.
+      #
+      # deploy.ps1 is what spawns it, and that is all it does: run.sh cannot
+      # detach itself from the Actions step, free a port held by the previous
+      # server, or decide when /api/health counts as a successful deploy.
       - name: Deploy
         shell: powershell
-        # A hard ceiling. The job-level timeout is 45 minutes, which is the
-        # right budget for a cold CUDA sync but far too long to sit on a
-        # deploy that has stopped making progress.
-        timeout-minutes: 20
+        # A hard ceiling on a deploy that has stopped making progress. Longer
+        # than it used to be: installing and prefetching now happen inside the
+        # detached run.sh, so this step covers the whole sequence rather than
+        # just the server's startup. It stays under the 45-minute job timeout
+        # so deploy.ps1 gets to dump the startup log before the job is killed,
+        # and a run.sh that fails outright is caught in seconds either way.
+        timeout-minutes: 35
         # VR_DATA_DIR / VR_STATE_DIR keep models, stems, the job database and
         # the Tidal token OUTSIDE the runner workspace. Without them the
         # deploy installs into _work\<repo>\<repo>, which is not the tree

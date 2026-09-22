@@ -1,23 +1,28 @@
 #!/usr/bin/env bash
 #
-# Start the app, installing whatever is missing first.
+# Start the app, installing and initialising whatever is missing first.
 #
-#   ./run.sh              start it
-#   ./run.sh --sync       reinstall from the lockfile first, then start
-#   ./run.sh --check      install if needed, verify the environment, exit
-#   ./run.sh --models     pre-download the UVR models (~0.7 GiB), then start
+#   ./run.sh
 #
-# The only entry point. Everything in setup/ is a helper this calls:
+# The only entry point, and it takes no arguments. Every run is the same
+# sequence, and everything in setup/ is a helper it calls:
 #
-#   setup/bootstrap.ps1   Windows prerequisites, each installed if it is
-#                         missing: uv, ffmpeg, a CPython 3.11. Prints the
-#                         interpreter to use.
-#   setup/verify_env.py   checks that each layer actually works
-#   setup/fetch_models.py warms the model cache for --models
+#   1. Windows prerequisites, each installed if it is missing: uv, ffmpeg, a
+#      CPython 3.11                                       setup/bootstrap.ps1
+#   2. the venv, and the packages from requirements/app.lock, via uv
+#   3. the environment check, which stops the run        setup/verify_env.py
+#   4. the UVR model cache, ~0.7 GiB                    setup/fetch_models.py
+#   5. the server
+#
+# There are no flags because there is no step worth skipping: each one is a
+# no-op on a machine that is already set up, and a flag only ever encoded "I
+# am fairly sure this part is fine". Being wrong about that is what produces
+# a box nobody can explain, so the sequence is not negotiable.
 #
 # Packages come from requirements/app.lock via uv. A missing venv, a
 # half-installed one, or a lockfile newer than the last install all end in the
-# same place, so you do not have to think about which.
+# same place, so you do not have to think about which. Delete
+# venv/.installed-from to force a reinstall on the next run.
 #
 # The same goes for the tools underneath: a missing one is installed rather
 # than reported. Nothing here stops to tell you to go and run an installer
@@ -39,19 +44,14 @@ say()  { printf '\033[36m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[33m[warn]\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[31m[fail]\033[0m %s\n' "$*" >&2; exit 1; }
 
+# Stop rather than ignore: an argument here is a habit from an older copy of
+# this script, and silently dropping it would mean silently not doing what
+# the caller asked for.
+[ $# -eq 0 ] || die "run.sh takes no arguments (got: $*) - see the top of this file"
+
+#: Whether the packages need (re)installing. Decided below, from the state of
+#: the venv rather than from a flag.
 sync_mode=no
-check_only=no
-get_models=no
-for arg in "$@"; do
-  case "$arg" in
-    --sync)   sync_mode=force ;;
-    --check)  check_only=yes ;;
-    --models) get_models=yes ;;
-    # The usage block at the top of this file, minus the comment markers.
-    -h|--help) sed -n '3,8p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
-    *) die "unknown option: $arg (try --help)" ;;
-  esac
-done
 
 # The venv layout differs by platform; this script has to work on both.
 venv_python() {
@@ -196,9 +196,9 @@ if [ "$sync_mode" = force ]; then
 fi
 
 # ffmpeg lives outside every venv, so no lockfile can catch a missing one.
-# Only decode and remux need it, so a missing one does not stop the server
-# coming up - but it is a one-off install, so hand it to the helper rather
-# than leave you with a warning and a download button that fails.
+# It is a one-off install, so hand it to the helper rather than leave you
+# with a warning and a download button that fails. The check below is what
+# decides whether a still-missing one is fatal.
 if ! command -v ffmpeg >/dev/null 2>&1; then
   if [ "$bootstrap_ran" = no ] && have_bootstrap; then
     run_bootstrap "$PY" || true
@@ -207,14 +207,34 @@ if ! command -v ffmpeg >/dev/null 2>&1; then
     "ffmpeg not on PATH - downloads and separation will fail"
 fi
 
-if [ "$get_models" = yes ]; then
-  say "caching UVR models"
-  "$PY" "$ROOT/setup/fetch_models.py"
-fi
+# ------------------------------------------------------------------- check
 
-if [ "$check_only" = yes ]; then
-  exec "$PY" "$ROOT/setup/verify_env.py"
-fi
+# Behaviour, not presence: verify_env.py builds a real ONNX Runtime session
+# rather than trusting get_available_providers(), which reports CUDA even
+# when CUDA cannot initialise. That is the case worth stopping for - a
+# CPU-only torch or a dead CUDA provider starts perfectly happily, answers
+# /api/health, and runs every separation about 10x slower.
+say "checking the environment"
+"$PY" "$ROOT/setup/verify_env.py" || die "environment check failed - see above"
+
+# ------------------------------------------------------------------ models
+
+# Before the server, never inside it.
+#
+# A model named in preload_models but absent from data/models is not an
+# error - audio-separator downloads it on first load. But that download would
+# then happen while whoever started this is counting down a health check, and
+# audio-separator streams straight to the final path guarded only by
+# isfile(), so an interrupted download leaves a truncated file that every
+# later run treats as cached. The model then never loads again until someone
+# deletes it by hand.
+#
+# Here the download has no deadline and no process waiting to be killed, and
+# fetch_models.py removes its own partial files if it fails anyway. A failure
+# is therefore only a slower first job, not a reason to refuse to start.
+say "caching UVR models"
+"$PY" "$ROOT/setup/fetch_models.py" \
+  || warn "model prefetch failed - they will download on first use instead"
 
 # ----------------------------------------------------------------- the app
 

@@ -1,9 +1,9 @@
 """Health check for the application environment. A helper, not an entry point.
 
-    ./run.sh --check
-
-Run by run.sh, inside the venv. Exits 0 if everything the app needs is
-working and 1 otherwise, so it also serves as a pre-flight check in CI.
+Run by ./run.sh on every start, inside the venv, after the packages are
+installed and before the server comes up. Exits 0 if everything the app needs
+is working and 1 otherwise, which is what stops a degraded environment from
+reaching production looking healthy.
 
 Operational, not a dev script: it answers "which layer is broken" when
 something stops working, rather than making you bisect it by hand.

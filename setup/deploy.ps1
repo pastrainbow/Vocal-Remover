@@ -5,13 +5,20 @@
 .DESCRIPTION
     Driven by .github/workflows/deploy-staging.yml on the self-hosted runner,
     but it is a normal script - run it by hand when you want the same
-    stop / sync / start / verify sequence:
+    stop / start / verify sequence:
 
         pwsh -File setup/deploy.ps1
 
-    Everything that knows *how* the app is supervised lives here, so swapping
-    the detached process below for a real service (nssm, or a scheduled task)
-    is a one-file change and the workflow does not move.
+    It deliberately knows nothing about installing, checking or prefetching.
+    All of that is ./run.sh, which does the same sequence on every run whether
+    a human or the runner starts it, so a deploy and a hand-started server are
+    the same thing and cannot drift apart. What is left here is the part a
+    shell script cannot do for itself: free the port, start run.sh detached
+    from the Actions step, and refuse to finish until /api/health agrees.
+
+    Everything that knows *how* the app is supervised therefore lives here, so
+    swapping the detached process below for a real service (nssm, or a
+    scheduled task) is a one-file change and the workflow does not move.
 
     Deliberately never cleans the working tree. data/models holds gigabytes of
     downloaded checkpoints and state/ holds the Tidal OAuth token; both are
@@ -22,11 +29,14 @@
 param(
     # Must agree with PORT in .env - this is only where we look for /api/health.
     [int]$Port = 8000,
-    # Generous because startup is dominated by loading BS-Roformer and
-    # MDX-Net into VRAM, not by uvicorn binding the socket.
-    [int]$HealthTimeoutSeconds = 300,
-    # Skip the GPU pre-flight. For iterating on this script only.
-    [switch]$SkipVerify,
+    # Half an hour, because this window now covers all of run.sh: a cold
+    # lockfile sync pulls ~3 GB of CUDA wheels, the model prefetch another
+    # ~0.7 GiB, and only then does the server start loading BS-Roformer and
+    # MDX-Net into VRAM. It is a ceiling on a run that has stopped making
+    # progress, not a normal wait - a box that is already set up is healthy in
+    # well under a minute, and a run.sh that FAILS is noticed the moment it
+    # exits rather than at this deadline. See Wait-Healthy.
+    [int]$HealthTimeoutSeconds = 1800,
 
     # Where models, stems, the job database and the Tidal token live.
     #
@@ -52,9 +62,13 @@ if (-not $DataDir)  { $DataDir  = Join-Path $Root 'data' }
 if (-not $StateDir) { $StateDir = Join-Path $Root 'state' }
 New-Item -ItemType Directory -Force -Path $DataDir, $StateDir | Out-Null
 
-# app/config.py reads these through pydantic-settings, which has no env
-# prefix configured, so exporting them here redirects the server and the
-# model prefetch alike. Must happen before anything else runs.
+# app/config.py reads these through pydantic-settings, which has no env prefix
+# configured, so DATA_DIR and STATE_DIR are what redirect the app away from
+# the runner workspace. They are set here for anything this script runs
+# itself; they do NOT reach the app, because Win32_Process.Create gives the
+# process it spawns a fresh environment block rather than a copy of this
+# one. Start-App writes them into its launcher for that reason - keep the two
+# in step.
 $env:DATA_DIR  = $DataDir
 $env:STATE_DIR = $StateDir
 
@@ -203,93 +217,76 @@ function Stop-App {
     Say "port $Port is free"
 }
 
-# --------------------------------------------------------------- sync/verify
-
-function Sync-Env {
-    # run.sh --check installs anything missing, then runs setup/verify_env.py,
-    # which builds a real ONNX Runtime session rather than trusting
-    # get_available_providers(). It exits 1 on a CPU-only torch or a dead
-    # CUDA provider - exactly the silent-degradation cases worth failing on.
-    Say "run.sh --check (install if needed, then verify) [$Bash]"
-    & $Bash './run.sh' '--check'
-    if ($LASTEXITCODE -ne 0) { Die "environment check failed (exit $LASTEXITCODE)" }
-}
-
-function Get-Models {
-    # Must happen HERE, not implicitly inside Worker.start().
-    #
-    # A model named in preload_models but absent from data/models is not an
-    # error - audio-separator downloads it on first load. But that download
-    # would then run inside the health-check window below, and a changed
-    # preload_models means ~0.7 GiB over a connection this script cannot
-    # predict. Overrunning the window would kill the app mid-download, and
-    # audio-separator streams to the final path guarded only by isfile() -
-    # so the truncated file would look cached forever and the model would
-    # never load again without manual deletion.
-    #
-    # Pulling it into its own step gives the download no deadline and no
-    # process waiting to be killed, and setup/fetch_models.py removes its own
-    # partial files if it fails anyway.
-    #
-    # NOT `run.sh --models`. That flag is documented as "pre-download the UVR
-    # models, then START" - only --check exits - so calling it here fetched
-    # the models and then exec'd uvicorn in the FOREGROUND, attached to this
-    # step, which never returns. Every "deploy hangs after a successful
-    # startup" was this line. fetch_models.py is the helper run.sh calls for
-    # the download half, and calling it directly is the whole of what is
-    # wanted here.
-    Say 'prefetching models'
-    $python = Join-Path $Root 'venv\Scripts\python.exe'
-    if (-not (Test-Path $python)) { Die "no venv python at $python" }
-    & $python (Join-Path $Root 'setup\fetch_models.py')
-    # Deliberately not fatal: a cached model with a dead network is still a
-    # perfectly deployable box, and startup will fail loudly if it is not.
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host '::warning::model prefetch failed; startup will retry the download' -ForegroundColor Yellow
-    }
-}
-
 # --------------------------------------------------------------------- start
 
 function Start-App {
     New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
-    $stamp  = Get-Date -Format 'yyyyMMdd-HHmmss'
-    $stdout = Join-Path $LogDir "app-$stamp.out.log"
-    $stderr = Join-Path $LogDir "app-$stamp.err.log"
+    $stamp    = Get-Date -Format 'yyyyMMdd-HHmmss'
+    $stdout   = Join-Path $LogDir "app-$stamp.out.log"
+    $stderr   = Join-Path $LogDir "app-$stamp.err.log"
+    $launcher = Join-Path $LogDir "launch-$stamp.cmd"
 
-    $python = Join-Path $Root 'venv\Scripts\python.exe'
-    if (-not (Test-Path $python)) { Die "no venv python at $python" }
-
-    Say 'starting app'
-    # Win32_Process.Create, not Start-Process, and this is the whole reason
-    # the job used to hang.
+    # One call to ./run.sh is the entire deploy: it installs what is missing,
+    # verifies the GPU stack, prefetches the models and only then execs the
+    # server. Everything this script used to do step by step is that script's
+    # own sequence now, which is why a deploy can no longer install something
+    # a hand-started server would not.
     #
-    # A long-lived server started as a descendant of an Actions step keeps
-    # that step's stdout/stderr handles open. The runner does not end a step
-    # until those handles close, so a PERFECTLY SUCCESSFUL deploy would hang
-    # forever, and cancelling would not help - the runner is blocked on a
+    # It has to run detached, and that is the whole reason for the machinery
+    # below. A long-lived server started as a descendant of an Actions step
+    # keeps that step's stdout/stderr handles open; the runner does not end a
+    # step until those handles close, so a PERFECTLY SUCCESSFUL deploy would
+    # hang forever, and cancelling would not help - the runner is blocked on a
     # handle, not on a signal. Start-Process -RedirectStandardOutput mostly
     # avoids that, but only while nothing else in the chain reintroduces
     # inheritance.
     #
     # Win32_Process.Create is not a child of this shell at all: the WMI
-    # service creates it, so there is no handle to inherit and no process
-    # tree for the runner to wait on. Redirection then has to happen inside
-    # the command line, which is what the cmd.exe wrapper is for.
-    $cmdLine = 'cmd.exe /c ""{0}" -m app.main >"{1}" 2>"{2}""' -f $python, $stdout, $stderr
-    $result  = ([wmiclass]'Win32_Process').Create($cmdLine, (Join-Path $Root 'src'))
+    # service creates the process, so there is no handle to inherit and no
+    # process tree for the runner to wait on.
+    #
+    # Two things follow from that, and both are what this generated .cmd is
+    # for. Redirection has to happen inside the command line, and the new
+    # process gets a FRESH environment block built from the registry rather
+    # than a copy of this shell's - so DATA_DIR and STATE_DIR, set above,
+    # simply would not arrive. Writing them into the launcher is what puts
+    # the deployed app's models, stems, job database and Tidal token where
+    # the workflow says they go. The file stays next to the logs as an exact
+    # record of how this run was started.
+    @(
+        '@echo off',
+        ('set "DATA_DIR={0}"'  -f $DataDir),
+        ('set "STATE_DIR={0}"' -f $StateDir),
+        ('cd /d "{0}"'         -f $Root),
+        ('"{0}" "./run.sh" > "{1}" 2> "{2}"' -f $Bash, $stdout, $stderr)
+    ) | Set-Content -Path $launcher -Encoding Oem
+
+    Say "starting run.sh detached [$Bash]"
+    $result = ([wmiclass]'Win32_Process').Create(('cmd.exe /c ""{0}""' -f $launcher), $Root)
     if ($result.ReturnValue -ne 0) {
-        Die "could not start the app: Win32_Process.Create returned $($result.ReturnValue)"
+        Die "could not start run.sh: Win32_Process.Create returned $($result.ReturnValue)"
     }
 
     Say "launched, logs in $LogDir\app-$stamp.*.log"
-    # The pid is deliberately NOT recorded here: Create returns cmd.exe's pid,
-    # and the python underneath it is what matters. Wait-Healthy records the
-    # real one once the port is bound.
-    return @{ Stdout = $stdout; Stderr = $stderr }
+    # The app's pid is deliberately NOT recorded here: Create returns
+    # cmd.exe's, and the python that run.sh eventually execs is what matters.
+    # Wait-Healthy records the real one once the port is bound. cmd.exe's pid
+    # is still worth keeping - it lives exactly as long as the run does, which
+    # is how a failed run is noticed without waiting out the timeout.
+    return @{ Stdout = $stdout; Stderr = $stderr; LauncherPid = $result.ProcessId }
 }
 
 # -------------------------------------------------------------------- verify
+
+function Show-StartupLog($started) {
+    # Nothing to interrogate but the logs: the run is detached, so this is the
+    # only account of what it was doing. run.sh narrates its progress on
+    # stdout and dies on stderr, and uvicorn logs to stderr, so both matter.
+    Write-Host '--- run.sh stdout ---' -ForegroundColor Yellow
+    Get-Content $started.Stdout -Tail 30 -ErrorAction SilentlyContinue
+    Write-Host '--- run.sh stderr ---' -ForegroundColor Yellow
+    Get-Content $started.Stderr -Tail 40 -ErrorAction SilentlyContinue
+}
 
 function Wait-Healthy($started) {
     $deadline = (Get-Date).AddSeconds($HealthTimeoutSeconds)
@@ -300,6 +297,17 @@ function Wait-Healthy($started) {
             $r = Invoke-RestMethod -Uri $Health -TimeoutSec 5
         }
         catch {
+            # A failed install, a failed environment check and a server that
+            # exits during startup all look identical from out here: nothing
+            # is listening. What separates them from "still working on it" is
+            # the launcher, which outlives run.sh by design and is gone the
+            # moment the run ends. Without this check a two-second failure
+            # would cost the full half-hour timeout - and on the health
+            # workflow, hold the deploy concurrency group for all of it.
+            if (-not (Get-Process -Id $started.LauncherPid -ErrorAction SilentlyContinue)) {
+                Show-StartupLog $started
+                Die 'run.sh exited without bringing the app up'
+            }
             Start-Sleep -Seconds 3
             continue
         }
@@ -340,11 +348,9 @@ function Wait-Healthy($started) {
         return
     }
 
-    # No process handle to interrogate any more, so the startup log is the
-    # only account of what went wrong. Dumping it here is what keeps a
-    # timeout diagnosable.
-    Write-Host '--- startup stderr ---' -ForegroundColor Yellow
-    Get-Content $started.Stderr -Tail 40 -ErrorAction SilentlyContinue
+    # Still running, still not healthy - a stuck download or a model that
+    # will not finish loading. The log is the only account of it.
+    Show-StartupLog $started
     Die "not healthy after ${HealthTimeoutSeconds}s"
 }
 
@@ -353,7 +359,6 @@ function Wait-Healthy($started) {
 Push-Location $Root
 try {
     Stop-App
-    if (-not $SkipVerify) { Sync-Env; Get-Models }
     Wait-Healthy (Start-App)
     Say 'deploy complete'
 }

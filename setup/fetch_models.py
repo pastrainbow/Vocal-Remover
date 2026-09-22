@@ -1,14 +1,12 @@
 """Pre-download the UVR models. A helper, not an entry point.
 
-    ./run.sh --models
-
 Models download themselves on first use, so this only decides *when* you wait
 for the ~0.7 GiB: now, or during the first job. Already-cached models are
 left alone.
 
-Run by run.sh inside the venv, after the packages are installed - it needs
-audio-separator, and it writes into data/models, which is where
-vocal_remove.ModelConfig looks by default.
+Run by ./run.sh on every start, inside the venv, after the packages are
+installed - it needs audio-separator, and it writes into data/models, which
+is where vocal_remove.ModelConfig looks by default.
 
 Two things make running this *before* starting the server worth the trouble,
 rather than letting the first startup do it:

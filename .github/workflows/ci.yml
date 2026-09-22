@@ -49,4 +49,4 @@ jobs:
       # torch. Weak, but it is the difference between finding a typo here and
       # finding it when the GPU box refuses to restart.
       - name: Byte-compile everything
-        run: python -m compileall -q src setup smoke_test tests
+        run: python -m compileall -q src setup tests
