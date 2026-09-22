@@ -1,0 +1,48 @@
+# Catch a drifted app.lock before it reaches the GPU box, where a bad sync
+# means a server that will not start rather than a red check.
+#
+# Its own workflow purely so it can be path-filtered: resolving hits
+# download.pytorch.org and is slow, and a job-level `if` cannot see changed
+# paths on a pull_request the way this can.
+name: Lockfile
+
+on:
+  push:
+    branches: [main]
+    paths: ['requirements/**']
+  pull_request:
+    paths: ['requirements/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Lockfile is in sync
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+
+      # The command from requirements/app.in's own header, verbatim. Keeping
+      # it identical is the point: if this drifts from the documented one,
+      # the documentation is what is wrong.
+      - name: Recompile and compare
+        run: |
+          uv pip compile requirements/app.in -o /tmp/fresh.lock \
+            --python-version 3.11 --python-platform windows \
+            --index-strategy unsafe-best-match --emit-index-url
+
+          # Strip comments before diffing: uv writes the invoking command
+          # into a header, so /tmp/fresh.lock's will never match the
+          # committed file's no matter how correct the pins are.
+          grep -v '^#' requirements/app.lock > /tmp/have.txt
+          grep -v '^#' /tmp/fresh.lock        > /tmp/want.txt
+
+          if ! diff -u /tmp/have.txt /tmp/want.txt; then
+            echo "::error::app.lock is stale - recompile it (see requirements/app.in)"
+            exit 1
+          fi
+          echo "lockfile matches app.in"

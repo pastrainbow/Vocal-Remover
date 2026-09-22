@@ -1,0 +1,146 @@
+# Deploy to the Tailscale box.
+#
+# Runs on a self-hosted runner installed on the GPU machine itself, which is
+# the only place this app can run: the worker preloads BS-Roformer and
+# MDX-Net into VRAM at startup and aborts if they will not load.
+#
+# The runner polls GitHub outbound over 443, so this needs no inbound port,
+# no port forward and no router configuration - the same constraint that put
+# the app behind Tailscale in the first place. Tailscale is not a step here;
+# it is already serving the running app, and `tailscale serve` keeps pointing
+# at 127.0.0.1:8000 across restarts.
+#
+# One-time setup on the box:
+#   1. Repo -> Settings -> Actions -> Runners -> New self-hosted runner
+#      (Windows x64). Add the labels: self-hosted, windows, gpu
+#   2. Install it as a service so it survives reboot and logon:
+#        ./svc.sh install   (or: .\svc.cmd install && .\svc.cmd start)
+#   3. Repo -> Settings -> Environments -> New environment -> "staging"
+#   4. Repo -> Settings -> Variables -> New variable:
+#        STAGING_URL = https://<machine>.<tailnet>.ts.net
+#
+# The runner runs as a service account: `bash` (Git Bash) and `uv` must be on
+# that account's PATH, not just yours. run.sh puts uv on PATH itself if it
+# finds it in the usual install locations; bash it cannot.
+name: Deploy staging
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      skip_ci:
+        description: 'Deploy without waiting for CI (use when CI is red for unrelated reasons)'
+        type: boolean
+        default: false
+
+# Never two deploys at once: they would fight over the venv, the port and the
+# pid file. Queue instead of cancelling - a half-applied deploy that gets
+# cancelled mid-sync leaves the box worse off than one that simply waits.
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # Gate on CI rather than duplicating it. The box is the only staging
+  # environment there is, so a broken deploy means no app until it is fixed.
+  await-ci:
+    name: Await CI
+    runs-on: ubuntu-latest
+    if: ${{ !inputs.skip_ci }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Wait for CI to pass on this commit
+        uses: lewagon/wait-on-check-action@v1.3.4
+        with:
+          ref: ${{ github.sha }}
+          check-name: 'Tests and syntax'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          wait-interval: 15
+
+  deploy:
+    name: Deploy to Tailscale box
+    needs: [await-ci]
+    # always() so a skipped await-ci (skip_ci) does not skip the deploy too.
+    if: ${{ always() && (needs.await-ci.result == 'success' || inputs.skip_ci) }}
+    runs-on: [self-hosted, windows, gpu]
+    environment:
+      name: staging
+      url: ${{ vars.STAGING_URL }}
+    timeout-minutes: 45   # a cold lockfile sync pulls ~3 GB of CUDA wheels
+
+    steps:
+      # clean: false is deliberate and load-bearing. data/models holds
+      # gigabytes of gitignored checkpoints and state/ holds the Tidal OAuth
+      # token; a clean checkout would re-download the models and log the box
+      # out on every single deploy.
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          clean: false
+
+      - name: Record current revision
+        id: previous
+        shell: pwsh
+        run: |
+          # Written before anything changes, so the rollback step below has
+          # somewhere to go back to.
+          $prev = git rev-parse HEAD~1 2>$null
+          if (-not $prev) { $prev = '' }
+          "sha=$prev" >> $env:GITHUB_OUTPUT
+
+      - name: Deploy
+        shell: pwsh
+        run: ./setup/deploy.ps1
+
+      # Same URL the phone uses. The step above already proved 127.0.0.1 is
+      # healthy; this proves the path that actually matters - that Tailscale
+      # is still serving it - and distinguishes "app is broken" from
+      # "tailscale serve was dropped".
+      - name: Verify Tailscale endpoint
+        if: ${{ vars.STAGING_URL != '' }}
+        shell: pwsh
+        run: |
+          try {
+            $r = Invoke-RestMethod -Uri "${{ vars.STAGING_URL }}/api/health" -TimeoutSec 20
+          }
+          catch {
+            Write-Host "::error::${{ vars.STAGING_URL }} is not serving: $_"
+            Write-Host 'Check `tailscale serve status` on the box.'
+            exit 1
+          }
+          if (-not $r.worker.running) {
+            Write-Host '::error::endpoint answered but the worker is not running'
+            exit 1
+          }
+          Write-Host "staging is live at ${{ vars.STAGING_URL }}"
+
+      # Best-effort: get the box back to the last known-good commit rather
+      # than leaving it down. Deliberately does not re-run the health gate -
+      # if the rollback is also broken, that needs a human, and a second
+      # failure here would only bury the original error.
+      - name: Roll back on failure
+        if: ${{ failure() && steps.previous.outputs.sha != '' }}
+        shell: pwsh
+        run: |
+          Write-Host "::warning::deploy failed, rolling back to ${{ steps.previous.outputs.sha }}"
+          git checkout --force ${{ steps.previous.outputs.sha }}
+          ./setup/deploy.ps1
+
+      - name: Summary
+        if: always()
+        shell: pwsh
+        run: |
+          $status = if ('${{ job.status }}' -eq 'success') { 'deployed' } else { 'FAILED' }
+          @"
+          ## Staging: $status
+
+          | | |
+          |---|---|
+          | Commit | ``${{ github.sha }}`` |
+          | URL | ${{ vars.STAGING_URL }} |
+          | Runner | $env:COMPUTERNAME |
+          "@ >> $env:GITHUB_STEP_SUMMARY

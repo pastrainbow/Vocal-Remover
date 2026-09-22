@@ -1,0 +1,45 @@
+# Everything a runner without an NVIDIA GPU can honestly check.
+#
+# It cannot install the real environment: app.lock is compiled
+# --python-platform windows and pins torch==2.8.0+cu128, so a hosted Linux
+# runner cannot resolve it and a hosted Windows runner would spend ten minutes
+# downloading CUDA wheels it has no GPU to run. The parts that need a GPU are
+# verified on the box itself - see deploy-staging.yml.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A superseded run on the same branch is wasted work.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Tests and syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'   # pinned by .python-version; verify_env enforces it at runtime
+
+      # No pip install: tests/ is stdlib-only by design, so the whole job is
+      # a checkout and a few seconds of SQLite.
+      - name: Unit tests
+        run: python -m unittest discover -s tests -v
+
+      # Catches syntax errors in the modules the tests cannot import, which
+      # is most of them - worker.py, pipeline.py and separator.py all pull in
+      # torch. Weak, but it is the difference between finding a typo here and
+      # finding it when the GPU box refuses to restart.
+      - name: Byte-compile everything
+        run: python -m compileall -q src setup smoke_test tests
