@@ -12,16 +12,24 @@
 #
 # One-time setup on the box:
 #   1. Repo -> Settings -> Actions -> Runners -> New self-hosted runner
-#      (Windows x64). Add the labels: self-hosted, windows, gpu
-#   2. Install it as a service so it survives reboot and logon:
-#        ./svc.sh install   (or: .\svc.cmd install && .\svc.cmd start)
+#      (Windows x64), in its OWN folder - a runner directory holds exactly one
+#      registration, so it cannot be shared with a runner for another repo.
+#   2. Configure it with the gpu label and as a service, so it survives
+#      reboot. The Windows package has no svc.cmd/svc.sh (those are Linux and
+#      macOS only); config.cmd installs the service itself:
+#        .\config.cmd --url https://github.com/pastrainbow/Vocal-Remover #          --labels gpu --runasservice
+#      Let it prompt for the service account interactively rather than
+#      passing --windowslogonpassword, which would put the password in shell
+#      history. Afterwards it is an ordinary Windows service:
+#        Get-Service actions.runner.pastrainbow-Vocal-Remover.*
 #   3. Repo -> Settings -> Environments -> New environment -> "staging"
 #   4. Repo -> Settings -> Variables -> New variable:
 #        STAGING_URL = https://<machine>.<tailnet>.ts.net
 #
-# The runner runs as a service account: `bash` (Git Bash) and `uv` must be on
-# that account's PATH, not just yours. run.sh puts uv on PATH itself if it
-# finds it in the usual install locations; bash it cannot.
+# Run the service as your own user account, not the LocalSystem default. The
+# deploy needs `bash` (Git Bash) and `uv` on PATH, the Tidal token in state/
+# was written by your user, and the CUDA setup is the one you tested by hand -
+# all three are properties of an account, and LocalSystem shares none of them.
 name: Deploy staging
 
 on:
