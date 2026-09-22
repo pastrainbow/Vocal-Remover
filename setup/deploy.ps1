@@ -26,15 +26,40 @@ param(
     # MDX-Net into VRAM, not by uvicorn binding the socket.
     [int]$HealthTimeoutSeconds = 300,
     # Skip the GPU pre-flight. For iterating on this script only.
-    [switch]$SkipVerify
+    [switch]$SkipVerify,
+
+    # Where models, stems, the job database and the Tidal token live.
+    #
+    # These MUST point outside the source tree when this runs under Actions.
+    # The runner checks out into its own workspace - _work\<repo>\<repo> -
+    # which is a different directory from any clone made by hand, so
+    # repo-relative data means the deploy quietly builds a PARALLEL
+    # installation: its own empty data/models (a fresh ~0.7 GiB download),
+    # its own state/tidal (logged out), its own job database. Fixed paths are
+    # what make the deployed app the same app from one run to the next.
+    #
+    # Unset falls back to repo-relative, which is still right when running
+    # this script by hand inside a working checkout.
+    [string]$DataDir  = $env:VR_DATA_DIR,
+    [string]$StateDir = $env:VR_STATE_DIR
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-$Root    = Split-Path -Parent $PSScriptRoot
-$PidFile = Join-Path $Root 'state\app.pid'
-$LogDir  = Join-Path $Root 'state\logs'
+$Root = Split-Path -Parent $PSScriptRoot
+if (-not $DataDir)  { $DataDir  = Join-Path $Root 'data' }
+if (-not $StateDir) { $StateDir = Join-Path $Root 'state' }
+New-Item -ItemType Directory -Force -Path $DataDir, $StateDir | Out-Null
+
+# app/config.py reads these through pydantic-settings, which has no env
+# prefix configured, so exporting them here redirects the server and the
+# model prefetch alike. Must happen before anything else runs.
+$env:DATA_DIR  = $DataDir
+$env:STATE_DIR = $StateDir
+
+$PidFile = Join-Path $StateDir 'app.pid'
+$LogDir  = Join-Path $StateDir 'logs'
 $Health  = "http://127.0.0.1:$Port/api/health"
 
 function Say($msg) { Write-Host "==> $msg" -ForegroundColor Cyan }

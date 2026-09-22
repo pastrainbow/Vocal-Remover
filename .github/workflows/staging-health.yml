@@ -71,6 +71,11 @@ jobs:
       - name: Repair
         if: steps.health.outputs.healthy != 'true'
         shell: powershell
+        # Must match deploy-staging.yml exactly, or a repair would install a
+        # second copy beside the one the deploy maintains.
+        env:
+          VR_DATA_DIR: ${{ vars.VR_DATA_DIR }}
+          VR_STATE_DIR: ${{ vars.VR_STATE_DIR }}
         run: |
           Write-Host '::warning::staging was down - running a full deploy to repair it'
           ./setup/deploy.ps1

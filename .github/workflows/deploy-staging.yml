@@ -130,6 +130,14 @@ jobs:
 
       - name: Deploy
         shell: powershell
+        # VR_DATA_DIR / VR_STATE_DIR keep models, stems, the job database and
+        # the Tidal token OUTSIDE the runner workspace. Without them the
+        # deploy installs into _work\<repo>\<repo>, which is not the tree
+        # anyone else uses: models re-download, the app starts logged out of
+        # Tidal, and job history restarts from empty.
+        env:
+          VR_DATA_DIR: ${{ vars.VR_DATA_DIR }}
+          VR_STATE_DIR: ${{ vars.VR_STATE_DIR }}
         run: ./setup/deploy.ps1
 
       # Same URL the phone uses. The step above already proved 127.0.0.1 is
@@ -175,6 +183,9 @@ jobs:
       - name: Roll back on failure
         if: ${{ failure() && steps.previous.outputs.sha != '' }}
         shell: powershell
+        env:
+          VR_DATA_DIR: ${{ vars.VR_DATA_DIR }}
+          VR_STATE_DIR: ${{ vars.VR_STATE_DIR }}
         run: |
           Write-Host "::warning::deploy failed, rolling back to ${{ steps.previous.outputs.sha }}"
           git checkout --force ${{ steps.previous.outputs.sha }}

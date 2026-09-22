@@ -56,11 +56,30 @@ def _snapshot(model_dir: Path) -> set:
     return {p for p in model_dir.rglob("*") if p.is_file()}
 
 
+def _model_dir() -> Path:
+    """Where the server will actually look for models.
+
+    MDXCModelConfig's default is derived from vocal_remove/config.py's own
+    location, so it is always <source tree>/data/models. That is wrong
+    wherever the source tree is not the installation - notably under a CI
+    runner, which checks out into its own workspace and would otherwise
+    prefetch into a directory the deployed server never reads. app.Settings
+    honours DATA_DIR, so ask it first.
+    """
+    try:
+        from app.config import get_settings
+
+        return get_settings().models_dir
+    except Exception as exc:  # noqa: BLE001 - a helper, never a blocker
+        print(f"  [warn] could not read models_dir ({type(exc).__name__}: "
+              f"{exc}); falling back to the source-tree default")
+    return MDXCModelConfig().model_dir
+
+
 def main() -> int:
     from audio_separator.separator import Separator
 
-    # Ask the config where models go rather than repeating the path here.
-    model_dir = MDXCModelConfig().model_dir
+    model_dir = _model_dir()
     model_dir.mkdir(parents=True, exist_ok=True)
     print(f"  into {model_dir}")
 
