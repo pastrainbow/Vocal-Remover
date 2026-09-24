@@ -111,10 +111,6 @@ def health(worker: Worker = Depends(get_worker),
         "tidal": {
             "authenticated": authenticated,
             "detail": auth_detail,
-            # Kept as a fallback for a headless box, where nobody can click
-            # the button: the CLI does the same device flow in a terminal.
-            "login_command": (
-                "venv\\Scripts\\python.exe -m smoke_test.tidal_cli login"),
         },
         "cache": {
             "enabled": settings.caching_enabled,

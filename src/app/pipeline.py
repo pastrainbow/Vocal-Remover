@@ -137,8 +137,7 @@ def _separate(conn, job: Job, download: td.DownloadResult,
 def _explain(exc: Exception) -> str:
     """Turn a library exception into something worth showing a user."""
     if isinstance(exc, td.AuthError):
-        return ("not logged in to Tidal - run: "
-                "venv\\Scripts\\python.exe -m smoke_test.tidal_cli login")
+        return "not signed in to Tidal - sign in from the banner on the page"
     if isinstance(exc, td.UnsupportedUrl):
         return f"unsupported URL: {exc}"
     if isinstance(exc, td.NotFound):

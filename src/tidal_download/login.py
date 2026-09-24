@@ -1,9 +1,9 @@
 """The device-code login, driven for you on a background thread.
 
 begin_login() and poll_login() on TidalClient are the primitives: they hand
-back a code and check it once. Driving them is a loop, and in a terminal that
-loop is three lines (see smoke_test.tidal_cli). Anywhere that cannot block it
-is not, for two reasons:
+back a code and check it once. Driving them is a loop, and in a script that
+can simply block, that loop is three lines. Anywhere that cannot block it is
+not, for two reasons:
 
   * one poll_login() call sleeps for Tidal's own poll interval (2-5s) before
     it answers, so polling it from a request handler or a UI thread ties that

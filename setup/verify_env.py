@@ -124,7 +124,7 @@ def _tidal():
     if state.valid:
         return True, f"authenticated as {state.user_id} ({state.country_code})"
     # Not an environment failure - the env is fine, you just have not logged in.
-    return True, f"NOT LOGGED IN ({state.detail}) - run the login command below"
+    return True, f"NOT LOGGED IN ({state.detail}) - see the next step below"
 
 
 @check("web stack")
@@ -154,7 +154,7 @@ except Exception:
 print("ENVIRONMENT OK")
 if not logged_in:
     print("")
-    print("Next step - log in to Tidal (one time, opens a browser link):")
-    print(r"  venv\Scripts\python.exe -m smoke_test.tidal_cli login")
+    print("Next step - sign in to Tidal (one time): once the server is up,")
+    print("open the page and use the sign-in banner at the top.")
 print("=" * 70)
 sys.exit(0)

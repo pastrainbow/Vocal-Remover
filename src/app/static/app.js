@@ -54,10 +54,8 @@ async function loadHealth() {
 // the countdown on screen.
 const LOGIN_POLL_MS = 2000;
 let loginTimer = null;
-let loginCommand = "";
 
 async function renderAuth(health) {
-  loginCommand = health.tidal.login_command;
   const box = el("auth-warning");
   el("logout").hidden = !health.tidal.authenticated;
 
@@ -105,8 +103,6 @@ function showLogin(login) {
       ? `Sign-in did not finish — ${login.detail}`
       : "Not signed in to Tidal."),
     loginButton(failed ? "Try again" : "Sign in to Tidal"),
-    node("span", "banner__note", "or run:"),
-    node("code", "", loginCommand),
   );
 }
 
@@ -400,6 +396,6 @@ function close(jobId) {
   await loadModels();
   await loadRecent();
   // Cheap poll: catches a session that expires while the page is open, or a
-  // login done elsewhere (another tab, or the CLI).
+  // login finished in another tab.
   setInterval(loadHealth, 15000);
 })();
