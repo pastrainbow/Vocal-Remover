@@ -59,7 +59,7 @@ whichever of them are missing.
 ### 1. Clone
 
 ```bash
-git clone <repo-url> Vocal-Remover
+git clone git@github.com:pastrainbow/Vocal-Remover.git
 cd Vocal-Remover
 ```
 
